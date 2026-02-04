@@ -1,0 +1,336 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  passwordHash  String
+  name          String
+  avatarUrl     String?
+  isAdmin       Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  leaguesOwned  League[]       @relation("LeagueCommissioner")
+  leagueMembers LeagueMember[]
+  ownedTeams    Team[]
+
+  @@index([email])
+}
+
+model League {
+  id             String         @id @default(cuid())
+  name           String
+  season         Int
+  maxTeams       Int            @default(12)
+  commissionerId String
+  sleeperId      String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  draftPicks     DraftPick[]
+  draftSettings  DraftSettings?
+  draftState     DraftState?
+  commissioner   User           @relation("LeagueCommissioner", fields: [commissionerId], references: [id])
+  members        LeagueMember[]
+  teams          Team[]
+  trades         Trade[]
+
+  @@index([commissionerId])
+  @@index([season])
+}
+
+model LeagueMember {
+  id       String     @id @default(cuid())
+  userId   String
+  leagueId String
+  role     LeagueRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
+  league   League     @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, leagueId])
+  @@index([leagueId])
+}
+
+model Team {
+  id              String         @id @default(cuid())
+  name            String
+  ownerId         String
+  leagueId        String
+  draftPosition   Int?
+  sleeperId       String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  ownedPicks      DraftPick[]    @relation("CurrentPickOwner")
+  originalPicks   DraftPick[]    @relation("OriginalPickOwner")
+  players         PlayerRoster[]
+  league          League         @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  owner           User           @relation(fields: [ownerId], references: [id])
+  tradesInitiated Trade[]        @relation("TradeInitiator")
+  tradesReceived  Trade[]        @relation("TradeReceiver")
+  tradeAssets     TradeAsset[]
+
+  @@unique([leagueId, draftPosition])
+  @@unique([leagueId, ownerId])
+  @@index([leagueId])
+  @@index([ownerId])
+}
+
+model Player {
+  id           String         @id @default(cuid())
+  sleeperId    String         @unique
+  firstName    String
+  lastName     String
+  fullName     String
+  position     Position
+  nflTeam      String?
+  age          Int?
+  yearsExp     Int?
+  status       PlayerStatus   @default(ACTIVE)
+  injuryStatus String?
+  avatarUrl    String?
+  adp          Float?
+  rank         Int?
+  positionRank Int?
+  byeWeek      Int?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  rosters      PlayerRoster[]
+  tradeAssets  TradeAsset[]
+
+  @@index([position])
+  @@index([nflTeam])
+  @@index([fullName])
+  @@index([rank])
+}
+
+model PlayerRoster {
+  id          String          @id @default(cuid())
+  teamId      String
+  playerId    String
+  leagueId    String
+  isKeeper    Boolean         @default(false)
+  keeperRound Int?
+  acquiredVia AcquisitionType
+  acquiredAt  DateTime        @default(now())
+  player      Player          @relation(fields: [playerId], references: [id])
+  team        Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, playerId])
+  @@unique([leagueId, playerId])
+  @@index([teamId])
+  @@index([leagueId])
+}
+
+model DraftPick {
+  id                String       @id @default(cuid())
+  leagueId          String
+  season            Int
+  round             Int
+  pickInRound       Int?
+  overallPickNumber Int?
+  originalOwnerId   String
+  currentOwnerId    String
+  selectedPlayerId  String?
+  selectedAt        DateTime?
+  isComplete        Boolean      @default(false)
+  isAutoPick        Boolean      @default(false)
+  autoPickPlayerId  String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  currentOwner      Team         @relation("CurrentPickOwner", fields: [currentOwnerId], references: [id])
+  league            League       @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  originalOwner     Team         @relation("OriginalPickOwner", fields: [originalOwnerId], references: [id])
+  tradeAssets       TradeAsset[]
+
+  @@unique([leagueId, season, round, pickInRound])
+  @@unique([leagueId, season, overallPickNumber])
+  @@index([leagueId, season])
+  @@index([currentOwnerId])
+  @@index([isComplete])
+}
+
+model Trade {
+  id                   String       @id @default(cuid())
+  leagueId             String
+  initiatorTeamId      String
+  receiverTeamId       String
+  status               TradeStatus  @default(PENDING)
+  proposedAt           DateTime     @default(now())
+  respondedAt          DateTime?
+  processedAt          DateTime?
+  expiresAt            DateTime?
+  forcedByCommissioner Boolean      @default(false)
+  commissionerNotes    String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  initiatorTeam        Team         @relation("TradeInitiator", fields: [initiatorTeamId], references: [id])
+  league               League       @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  receiverTeam         Team         @relation("TradeReceiver", fields: [receiverTeamId], references: [id])
+  assets               TradeAsset[]
+
+  @@index([leagueId])
+  @@index([status])
+  @@index([initiatorTeamId])
+  @@index([receiverTeamId])
+}
+
+model TradeAsset {
+  id               String         @id @default(cuid())
+  tradeId          String
+  fromTeamId       String
+  assetType        TradeAssetType
+  draftPickId      String?
+  playerId         String?
+  futurePickSeason Int?
+  futurePickRound  Int?
+  createdAt        DateTime       @default(now())
+  draftPick        DraftPick?     @relation(fields: [draftPickId], references: [id])
+  fromTeam         Team           @relation(fields: [fromTeamId], references: [id])
+  player           Player?        @relation(fields: [playerId], references: [id])
+  trade            Trade          @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+
+  @@index([tradeId])
+  @@index([fromTeamId])
+  @@index([assetType])
+}
+
+model DraftSettings {
+  id                   String    @id @default(cuid())
+  leagueId             String    @unique
+  draftType            DraftType @default(LINEAR)
+  totalRounds          Int       @default(14)
+  timerDurationSeconds Int       @default(90)
+  reserveTimeSeconds   Int       @default(120)
+  pauseOnTrade         Boolean   @default(true)
+  maxKeepers           Int       @default(7)
+  keeperDeadline       DateTime?
+  scheduledStartTime   DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  league               League    @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+}
+
+model DraftState {
+  id                    String      @id @default(cuid())
+  leagueId              String      @unique
+  status                DraftStatus @default(NOT_STARTED)
+  currentRound          Int         @default(1)
+  currentPick           Int         @default(1)
+  currentTeamId         String?
+  isPaused              Boolean     @default(false)
+  pauseReason           String?
+  timerStartedAt        DateTime?
+  timerSecondsRemaining Int?
+  lastPickId            String?
+  undoAvailable         Boolean     @default(false)
+  startedAt             DateTime?
+  completedAt           DateTime?
+  lastActivityAt        DateTime    @default(now())
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+  league                League      @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+}
+
+model DraftActivityLog {
+  id            String            @id @default(cuid())
+  leagueId      String
+  activityType  DraftActivityType
+  description   String
+  teamId        String?
+  pickNumber    Int?
+  playerId      String?
+  tradeId       String?
+  triggeredById String?
+  metadata      Json?
+  createdAt     DateTime          @default(now())
+
+  @@index([leagueId])
+  @@index([activityType])
+  @@index([createdAt])
+}
+
+enum LeagueRole {
+  COMMISSIONER
+  CO_COMMISSIONER
+  MEMBER
+}
+
+enum Position {
+  QB
+  RB
+  WR
+  TE
+  K
+  DEF
+  FLEX
+}
+
+enum PlayerStatus {
+  ACTIVE
+  INACTIVE
+  INJURED_RESERVE
+  PRACTICE_SQUAD
+  FREE_AGENT
+}
+
+enum AcquisitionType {
+  DRAFTED
+  TRADED
+  KEEPER
+  FREE_AGENT
+}
+
+enum TradeStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+  PROCESSING
+  COMPLETED
+  VETOED
+}
+
+enum TradeAssetType {
+  DRAFT_PICK
+  PLAYER
+  FUTURE_PICK
+}
+
+enum DraftType {
+  SNAKE
+  LINEAR
+  AUCTION
+  THIRD_ROUND_REVERSAL
+}
+
+enum DraftStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum DraftActivityType {
+  DRAFT_STARTED
+  DRAFT_PAUSED
+  DRAFT_RESUMED
+  DRAFT_COMPLETED
+  PICK_MADE
+  PICK_UNDONE
+  TRADE_PROPOSED
+  TRADE_ACCEPTED
+  TRADE_REJECTED
+  TRADE_CANCELLED
+  TRADE_FORCED
+  TIMER_EXPIRED
+  AUTO_PICK
+  ORDER_UPDATED
+  SETTINGS_CHANGED
+}
