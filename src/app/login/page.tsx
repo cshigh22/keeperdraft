@@ -40,11 +40,16 @@ export default function LoginPage() {
     fetchTeams();
   }, []);
 
-  // Check if already logged in
+  // Check for existing session but don't auto-redirect to avoid stale ID loops
   useEffect(() => {
     const stored = localStorage.getItem('draftSession');
     if (stored) {
-      window.location.href = '/draft';
+      try {
+        const session = JSON.parse(stored);
+        console.log('Existing session found for:', session.teamName);
+      } catch (e) {
+        localStorage.removeItem('draftSession');
+      }
     }
   }, []);
 

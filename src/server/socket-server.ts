@@ -37,7 +37,9 @@ type TypedServer = Server<
 const httpServer = createServer();
 const io: TypedServer = new Server(httpServer, {
   cors: {
-    origin: process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+    origin: process.env.NODE_ENV === 'production'
+      ? (process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000')
+      : true, // Allow all origins in development
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -100,9 +102,27 @@ io.on(SocketEvents.CONNECTION, (socket) => {
   socket.on(SocketEvents.JOIN_DRAFT_ROOM, async (payload) => {
     const { leagueId, userId, teamId } = payload;
 
+    console.log(`[DEBUG] JOIN_DRAFT_ROOM - userId: ${userId}, leagueId: ${leagueId}, teamId: ${teamId}`);
+
     try {
+      // First, check if user exists
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+      });
+      console.log(`[DEBUG] User lookup (id: ${userId}):`, user?.email);
+
+      // Check all league members for this league
+      const allMembers = await prisma.leagueMember.findMany({
+        where: { leagueId },
+        include: { user: true },
+      });
+      console.log(
+        `[DEBUG] All league members for ${leagueId}:`,
+        allMembers.map((m) => ({ userId: m.userId, userEmail: m.user.email }))
+      );
+
       // Verify user has access to this league
-      const member = await prisma.leagueMember.findUnique({
+      let member = await prisma.leagueMember.findUnique({
         where: {
           userId_leagueId: { userId, leagueId },
         },
@@ -110,6 +130,37 @@ io.on(SocketEvents.CONNECTION, (socket) => {
           league: true,
         },
       });
+
+      console.log(`[DEBUG] LeagueMember lookup result:`, member);
+
+      // FALLBACK: If member record is missing but user is commissioner or has a team,
+      // create the membership record on the fly to prevent lockout
+      if (!member) {
+        console.log(`[DEBUG] Member record missing for user ${userId} in league ${leagueId}. Checking fallback...`);
+
+        const [leagueAsCommissioner, userTeam] = await Promise.all([
+          prisma.league.findFirst({
+            where: { id: leagueId, commissionerId: userId }
+          }),
+          prisma.team.findFirst({
+            where: { leagueId, ownerId: userId }
+          })
+        ]);
+
+        if (leagueAsCommissioner || userTeam) {
+          console.log(`[DEBUG] User ${userId} is commissioner or has team. Creating missing LeagueMember record.`);
+          member = await prisma.leagueMember.create({
+            data: {
+              userId,
+              leagueId,
+              role: leagueAsCommissioner ? 'COMMISSIONER' : 'MEMBER'
+            },
+            include: {
+              league: true
+            }
+          });
+        }
+      }
 
       if (!member) {
         socket.emit(SocketEvents.ERROR, {
@@ -592,9 +643,26 @@ async function shouldPauseForTrade(
 
 export { io, httpServer };
 
-export function startSocketServer(port: number = 3001): void {
+export function startSocketServer(port: number = Number(process.env.SOCKET_PORT) || 3002): void {
+  httpServer.once('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`Port ${port} is already in use. Attempting to use port ${port + 1}...`);
+      startSocketServer(port + 1);
+    } else {
+      console.error('Socket.IO server error:', err);
+    }
+  });
+
   httpServer.listen(port, () => {
-    console.log(`Socket.IO server running on port ${port}`);
+    console.log(`\n╔════════════════════════════════════════════════════════╗`);
+    console.log(`║                                                        ║`);
+    console.log(`║   🏈 KeeperDraft Socket.IO Server                      ║`);
+    console.log(`║                                                        ║`);
+    console.log(`║   Server running on port ${port}                         ║`);
+    console.log(`║                                                        ║`);
+    console.log(`║   WebSocket URL: ws://localhost:${port}                  ║`);
+    console.log(`║                                                        ║`);
+    console.log(`╚════════════════════════════════════════════════════════╝\n`);
   });
 }
 

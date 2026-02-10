@@ -291,15 +291,26 @@ export default function DraftRoom() {
 
       {/* Error Display */}
       {state.error && (
-        <Dialog open onOpenChange={() => { }}>
+        <Dialog open={!!state.error} onOpenChange={() => { }}>
           <DialogContent>
             <DialogHeader>
               <DialogTitle className="text-destructive">Error</DialogTitle>
               <DialogDescription>{state.error.message}</DialogDescription>
             </DialogHeader>
-            <Button onClick={() => window.location.reload()}>
-              Reload Page
-            </Button>
+            <div className="flex flex-col gap-2">
+              <Button onClick={() => window.location.reload()}>
+                Try Reloading
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  localStorage.removeItem('draftSession');
+                  window.location.href = '/login';
+                }}
+              >
+                Back to Team Selection
+              </Button>
+            </div>
           </DialogContent>
         </Dialog>
       )}
