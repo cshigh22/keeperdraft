@@ -18,6 +18,7 @@ export const SocketEvents = {
   DRAFT_START: 'draft_start',
   DRAFT_PAUSE: 'draft_pause',
   DRAFT_RESUME: 'draft_resume',
+  DRAFT_RESET: 'draft_reset',
   DRAFT_COMPLETE: 'draft_complete',
 
   // Timer events
@@ -64,6 +65,15 @@ export interface PlayerSummary {
   position: Position;
   nflTeam: string | null;
   rank: number | null;
+  adp?: number | null;
+  bye?: number | null;
+  injuryStatus?: string | null;
+}
+
+export interface RosterPlayer extends PlayerSummary {
+  isKeeper: boolean;
+  acquiredAt?: string;
+  round?: number;
 }
 
 // Team summary for broadcasts
@@ -78,6 +88,7 @@ export interface TeamSummary {
 // Draft pick summary
 export interface DraftPickSummary {
   id: string;
+  season: number;
   round: number;
   pickInRound: number;
   overallPickNumber: number;
@@ -154,6 +165,7 @@ export interface PickMadePayload {
     teamId: string;
     team: TeamSummary;
   };
+  teamRosterUpdates?: Record<string, RosterPlayer[]>;
   timestamp: string;
 }
 
@@ -165,6 +177,7 @@ export interface PickUndonePayload {
   playerId: string;
   playerName: string;
   revertedToTeamId: string;
+  teamRosterUpdates?: Record<string, RosterPlayer[]>;
   timestamp: string;
 }
 
@@ -201,6 +214,7 @@ export interface TradeAcceptedPayload {
   receiverAssets: TradeAssetPayload[];
   // Updated draft order if picks were traded
   updatedDraftOrder?: DraftPickSummary[];
+  teamRosterUpdates?: Record<string, RosterPlayer[]>;
   // If trade occurred while on the clock
   draftPaused: boolean;
   pauseReason?: string;
@@ -234,6 +248,19 @@ export interface DraftPausePayload {
   timestamp: string;
 }
 
+// Roster settings
+export interface RosterSettings {
+  qbCount: number;
+  rbCount: number;
+  wrCount: number;
+  teCount: number;
+  flexCount: number;
+  superflexCount: number;
+  kCount: number;
+  defCount: number;
+  benchCount: number;
+}
+
 // State sync (full state for reconnection)
 export interface StateSyncPayload {
   leagueId: string;
@@ -247,10 +274,14 @@ export interface StateSyncPayload {
   timerSecondsRemaining: number | null;
   draftOrder: TeamSummary[];
   completedPicks: DraftPickSummary[];
+  allPicks: DraftPickSummary[]; // Include all picks (for trade purposes)
   availablePlayers: PlayerSummary[];
+  teamRosters: Record<string, RosterPlayer[]>; // Players owned by each team
+  teamRosterUpdates?: Record<string, RosterPlayer[]>; // Optimization for trade/pick updates
   pendingTrades: TradeOfferedPayload[];
   totalRounds?: number;
   draftType?: 'SNAKE' | 'LINEAR';
+  rosterSettings?: RosterSettings;
   timestamp: string;
 }
 
@@ -273,6 +304,7 @@ export interface ClientToServerEvents {
   [SocketEvents.DRAFT_START]: (payload: { leagueId: string }) => void;
   [SocketEvents.DRAFT_PAUSE]: (payload: { leagueId: string; reason?: string }) => void;
   [SocketEvents.DRAFT_RESUME]: (payload: { leagueId: string }) => void;
+  [SocketEvents.DRAFT_RESET]: (payload: { leagueId: string }) => void;
   [SocketEvents.FORCE_PICK]: (payload: { leagueId: string; playerId: string }) => void;
   [SocketEvents.PICK_UNDONE]: (payload: { leagueId: string }) => void;
   [SocketEvents.ORDER_UPDATED]: (payload: { leagueId: string; teamOrder: string[] }) => void;
@@ -299,6 +331,7 @@ export interface ServerToClientEvents {
   [SocketEvents.DRAFT_START]: (payload: DraftStartPayload) => void;
   [SocketEvents.DRAFT_PAUSE]: (payload: DraftPausePayload) => void;
   [SocketEvents.DRAFT_RESUME]: (payload: DraftPausePayload) => void;
+  [SocketEvents.DRAFT_RESET]: (payload: StateSyncPayload) => void;
   [SocketEvents.DRAFT_COMPLETE]: (payload: { leagueId: string; completedAt: string }) => void;
   [SocketEvents.TIMER_TICK]: (payload: TimerTickPayload) => void;
   [SocketEvents.TIMER_EXPIRED]: (payload: { leagueId: string; teamId: string; pickNumber: number }) => void;

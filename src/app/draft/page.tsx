@@ -16,9 +16,12 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { DraftBoard } from '@/components/draft/DraftBoard';
-import { PlayerQueue } from '@/components/draft/PlayerQueue';
+import { PlayerPool } from '@/components/draft/PlayerPool';
+import { SidebarRoster } from '@/components/draft/SidebarRoster';
 import { TradeModal, IncomingTradePopup } from '@/components/trade/TradeModal';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
+import { TeamRosters } from '@/components/draft/TeamRosters';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Wifi,
   WifiOff,
@@ -26,6 +29,8 @@ import {
   LogOut,
   Bell,
   ArrowLeftRight,
+  RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 import type { TradeOfferedPayload } from '@/types/socket';
 
@@ -62,6 +67,7 @@ export default function DraftRoom() {
   const { session, setSession } = useMockSession();
   const [incomingTrade, setIncomingTrade] = useState<TradeOfferedPayload | null>(null);
   const [notificationCount, setNotificationCount] = useState(0);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   // Socket connection
   const {
@@ -112,7 +118,7 @@ export default function DraftRoom() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="min-h-screen bg-white flex flex-col">
       {/* Header */}
       <header className="border-b bg-card sticky top-0 z-50">
         <div className="container mx-auto px-4 py-3">
@@ -177,23 +183,64 @@ export default function DraftRoom() {
                 <TradeModal
                   myTeam={myTeam}
                   allTeams={state.draftOrder}
-                  myPicks={state.completedPicks.filter(
-                    (p) => p.currentOwnerId === myTeam.id && !p.isComplete
-                  )}
-                  myPlayers={[]} // Would come from roster state
+                  myPlayers={state.teamRosters[myTeam.id] || []}
+                  allPicks={state.allPicks}
+                  teamRosters={state.teamRosters}
+                  totalRounds={state.totalRounds}
                   onProposeTrade={actions.proposeTrade}
                 />
               )}
 
-              {/* Commissioner link */}
+              {/* Commissioner Actions */}
               {session.isCommissioner && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => (window.location.href = '/admin')}
-                >
-                  <Settings className="w-5 h-5" />
-                </Button>
+                <>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={() => setShowResetConfirm(true)}
+                    title="Restart Draft"
+                  >
+                    <RefreshCw className="w-5 h-5" />
+                  </Button>
+
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => (window.location.href = '/admin')}
+                    title="Commissioner Settings"
+                  >
+                    <Settings className="w-5 h-5" />
+                  </Button>
+
+                  <Dialog open={showResetConfirm} onOpenChange={setShowResetConfirm}>
+                    <DialogContent>
+                      <DialogHeader>
+                        <div className="flex items-center gap-2 text-destructive mb-2">
+                          <AlertTriangle className="w-6 h-6" />
+                          <DialogTitle>Restart Draft?</DialogTitle>
+                        </div>
+                        <DialogDescription>
+                          This will completely wipe all draft picks, return all traded picks to their original owners, and clear all team rosters. This action <span className="font-bold text-destructive">cannot be undone</span>.
+                        </DialogDescription>
+                      </DialogHeader>
+                      <div className="flex justify-end gap-3 mt-4">
+                        <Button variant="outline" onClick={() => setShowResetConfirm(false)}>
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          onClick={() => {
+                            actions.resetDraft();
+                            setShowResetConfirm(false);
+                          }}
+                        >
+                          Reset Everything
+                        </Button>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
+                </>
               )}
 
               {/* User/Team info */}
@@ -228,33 +275,48 @@ export default function DraftRoom() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 container mx-auto px-4 py-4">
-        <div className="flex flex-col lg:flex-row gap-4 h-full">
-          {/* Draft Board */}
-          <div className="flex-1 min-w-0">
-            <DraftBoard
-              teams={state.draftOrder}
-              completedPicks={state.completedPicks}
-              totalRounds={state.totalRounds}
-              currentPick={state.currentPick}
-              currentTeamId={state.currentTeamId}
-              isPaused={state.isPaused}
-              draftType={state.draftType}
-              myTeamId={session.teamId}
-            />
+      <main className="flex-1 container mx-auto px-4 py-4 min-h-0 flex flex-col">
+        <div className="flex flex-col lg:flex-row gap-4 h-full min-h-0">
+          {/* Main Area (Draft Board) */}
+          <div className="flex-1 min-w-0 flex flex-col h-full bg-white">
+            <div className="flex-1 min-h-0">
+              <DraftBoard
+                teams={state.draftOrder}
+                completedPicks={state.completedPicks}
+                allPicks={state.allPicks}
+                totalRounds={state.totalRounds}
+                currentPick={state.currentPick}
+                currentTeamId={state.currentTeamId}
+                isPaused={state.isPaused}
+                draftType={state.draftType}
+                myTeamId={session.teamId}
+              />
+            </div>
+
+            {/* Recent Picks Footer (Optional as per image but sticking to sidebar request first) */}
           </div>
 
-          {/* Player Queue Sidebar */}
-          <div className="w-full lg:w-96 lg:flex-shrink-0">
-            <PlayerQueue
-              players={state.availablePlayers}
-              isMyTurn={isMyTurn}
-              currentTeamName={state.currentTeam?.name || null}
-              timerSeconds={state.timerSecondsRemaining}
-              isPaused={state.isPaused}
-              isLoading={!state.isConnected}
-              onDraftPlayer={handleDraftPlayer}
-            />
+          {/* Unified Sidebar (Player Pool & Team Roster) */}
+          <div className="w-full lg:w-[720px] lg:flex-shrink-0 h-full flex flex-row border-l border-slate-200 overflow-hidden">
+            {/* Left Column: Player Pool */}
+            <div className="flex-1 h-full border-r border-slate-200">
+              <PlayerPool
+                players={state.availablePlayers}
+                isMyTurn={isMyTurn}
+                onDraftPlayer={handleDraftPlayer}
+                isLoading={!state.isConnected}
+              />
+            </div>
+
+            {/* Right Column: Team Roster */}
+            <div className="flex-1 h-full">
+              <SidebarRoster
+                teams={state.draftOrder}
+                teamRosters={state.teamRosters}
+                rosterSettings={state.rosterSettings}
+                myTeamId={session.teamId}
+              />
+            </div>
           </div>
         </div>
       </main>
@@ -270,12 +332,16 @@ export default function DraftRoom() {
               assetType: a.assetType,
               draftPick: a.draftPick,
               player: a.player,
+              futurePickSeason: a.futurePickSeason,
+              futurePickRound: a.futurePickRound,
             })),
             receiverAssets: incomingTrade.receiverAssets.map((a) => ({
               id: a.id,
               assetType: a.assetType,
               draftPick: a.draftPick,
               player: a.player,
+              futurePickSeason: a.futurePickSeason,
+              futurePickRound: a.futurePickRound,
             })),
           }}
           onAccept={(tradeId) => {

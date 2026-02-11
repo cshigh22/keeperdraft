@@ -3,7 +3,7 @@
 
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -26,7 +26,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { ArrowLeftRight, Package, User, AlertCircle } from 'lucide-react';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { ArrowLeftRight, Package, User, AlertCircle, X } from 'lucide-react';
 import type { TeamSummary, DraftPickSummary, PlayerSummary } from '@/types/socket';
 
 // ============================================================================
@@ -36,12 +44,14 @@ import type { TeamSummary, DraftPickSummary, PlayerSummary } from '@/types/socke
 interface TradeModalProps {
   myTeam: TeamSummary;
   allTeams: TeamSummary[];
-  myPicks: DraftPickSummary[];
   myPlayers: PlayerSummary[];
+  allPicks: DraftPickSummary[];
+  teamRosters: Record<string, PlayerSummary[]>;
+  totalRounds: number;
   onProposeTrade: (
     receiverTeamId: string,
-    myAssets: { assetType: string; id: string }[],
-    theirAssets: { assetType: string; id: string }[]
+    myAssets: { assetType: string; id: string; season?: number; round?: number }[],
+    theirAssets: { assetType: string; id: string; season?: number; round?: number }[]
   ) => void;
   disabled?: boolean;
 }
@@ -167,8 +177,10 @@ function TradeSummary({ myTeamName, theirTeamName, myAssets, theirAssets }: Trad
 export function TradeModal({
   myTeam,
   allTeams,
-  myPicks,
   myPlayers,
+  allPicks,
+  teamRosters,
+  totalRounds,
   onProposeTrade,
   disabled = false,
 }: TradeModalProps) {
@@ -185,24 +197,52 @@ export function TradeModal({
 
   const selectedTeam = otherTeams.find((t) => t.id === selectedTeamId);
 
-  // Convert my picks and players to TradeAssets
-  const myTradeAssets: TradeAsset[] = useMemo(() => {
+  // Helper to generate future picks (next 5 years)
+  // Helper to generate assets for a team
+  // Helper to generate assets for a team
+  const getTeamAssets = useCallback((teamId: string, players: PlayerSummary[]) => {
     const assets: TradeAsset[] = [];
+    const currentYear = new Date().getFullYear();
 
-    // Add picks (only incomplete ones I own)
-    myPicks
-      .filter((p) => !p.isComplete && p.currentOwnerId === myTeam.id)
+    // 1. Add picks from allPicks owned by this team
+    allPicks
+      .filter((p) => p.currentOwnerId === teamId && !p.isComplete)
       .forEach((pick) => {
+        const isFuture = pick.season > currentYear;
+        const originalOwner = allTeams.find((t) => t.id === pick.originalOwnerId);
         assets.push({
           type: 'pick',
-          id: pick.id,
-          display: `Round ${pick.round}, Pick ${pick.pickInRound}`,
-          subtext: pick.originalOwnerId !== pick.currentOwnerId ? 'Acquired via trade' : undefined,
+          id: isFuture ? `FUTURE_PICK:${pick.originalOwnerId}:${pick.season}:${pick.round}` : pick.id,
+          display: isFuture
+            ? `${pick.season} Round ${pick.round} Pick`
+            : `${pick.season} Round ${pick.round}, Pick ${pick.pickInRound}`,
+          subtext: pick.originalOwnerId !== pick.currentOwnerId
+            ? `Acquired via ${originalOwner?.ownerName || 'Trade'}`
+            : isFuture ? 'Future Draft Pick' : `Pick ${pick.overallPickNumber}`,
         });
       });
 
-    // Add players
-    myPlayers.forEach((player) => {
+    // 2. Add virtual future picks (only if not already traded/represented in allPicks)
+    const rounds = totalRounds || 15;
+    for (let year = currentYear + 1; year <= currentYear + 3; year++) {
+      for (let round = 1; round <= rounds; round++) {
+        const isRepresented = allPicks.some(
+          p => p.season === year && p.round === round && p.originalOwnerId === teamId
+        );
+
+        if (!isRepresented) {
+          assets.push({
+            type: 'pick',
+            id: `FUTURE_PICK:${teamId}:${year}:${round}`,
+            display: `${year} Round ${round} Pick`,
+            subtext: `Future Draft Pick`,
+          });
+        }
+      }
+    }
+
+    // 3. Add players
+    players.forEach((player) => {
       assets.push({
         type: 'player',
         id: player.id,
@@ -212,25 +252,52 @@ export function TradeModal({
     });
 
     return assets;
-  }, [myPicks, myPlayers, myTeam.id]);
+  }, [allPicks, totalRounds]);
 
-  // Mock their assets (in real app, fetch from server)
-  // For now, just show their picks from the completed picks list
+  // Convert my picks and players to TradeAssets
+  const myTradeAssets: TradeAsset[] = useMemo(() => {
+    return getTeamAssets(myTeam.id, myPlayers);
+  }, [getTeamAssets, myPlayers, myTeam.id]);
+
+  // Their assets based on selected team
   const theirTradeAssets: TradeAsset[] = useMemo(() => {
     if (!selectedTeamId) return [];
-
-    const assets: TradeAsset[] = [];
-
-    // This would normally come from the server
-    // For demo, we'll show a placeholder
-    // In production, you'd fetch the other team's tradeable assets
-
-    return assets;
-  }, [selectedTeamId]);
+    const theirPlayers = teamRosters[selectedTeamId] || [];
+    return getTeamAssets(selectedTeamId, theirPlayers);
+  }, [selectedTeamId, getTeamAssets, teamRosters]);
 
   // Build selected assets for summary
   const mySelectedAssets = myTradeAssets.filter((a) => selectedMyAssets.has(a.id));
   const theirSelectedAssets = theirTradeAssets.filter((a) => selectedTheirAssets.has(a.id));
+
+  // Auto-clear selections that are no longer available
+  useEffect(() => {
+    setSelectedMyAssets((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      prev.forEach((id) => {
+        if (!myTradeAssets.some((a) => a.id === id)) {
+          next.delete(id);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [myTradeAssets]);
+
+  useEffect(() => {
+    setSelectedTheirAssets((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      prev.forEach((id) => {
+        if (!theirTradeAssets.some((a) => a.id === id)) {
+          next.delete(id);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [theirTradeAssets]);
 
   const canPropose =
     selectedTeamId &&
@@ -263,18 +330,40 @@ export function TradeModal({
   const handlePropose = () => {
     if (!canPropose) return;
 
-    const myAssets = mySelectedAssets.map((a) => ({
-      assetType: a.type === 'pick' ? 'DRAFT_PICK' : 'PLAYER',
-      id: a.id,
-    }));
+    const myAssets = mySelectedAssets.map((a) => {
+      if (a.id.startsWith('FUTURE_PICK:')) {
+        const [, , year, round] = a.id.split(':');
+        return {
+          assetType: 'FUTURE_PICK',
+          id: a.id,
+          season: parseInt(year!),
+          round: parseInt(round!),
+        };
+      }
+      return {
+        assetType: a.type === 'pick' ? 'DRAFT_PICK' : 'PLAYER',
+        id: a.id,
+      };
+    });
 
-    const theirAssets = theirSelectedAssets.map((a) => ({
-      assetType: a.type === 'pick' ? 'DRAFT_PICK' : 'PLAYER',
-      id: a.id,
-    }));
+    const theirAssets = theirSelectedAssets.map((a) => {
+      if (a.id.startsWith('FUTURE_PICK:')) {
+        const [, , year, round] = a.id.split(':');
+        return {
+          assetType: 'FUTURE_PICK',
+          id: a.id,
+          season: parseInt(year!),
+          round: parseInt(round!),
+        };
+      }
+      return {
+        assetType: a.type === 'pick' ? 'DRAFT_PICK' : 'PLAYER',
+        id: a.id,
+      };
+    });
 
     onProposeTrade(selectedTeamId, myAssets, theirAssets);
-    
+
     // Reset and close
     setSelectedMyAssets(new Set());
     setSelectedTheirAssets(new Set());
@@ -426,8 +515,8 @@ interface IncomingTradePopupProps {
   trade: {
     tradeId: string;
     initiatorTeam: TeamSummary;
-    initiatorAssets: { id: string; assetType: string; draftPick?: { round: number }; player?: { fullName: string } }[];
-    receiverAssets: { id: string; assetType: string; draftPick?: { round: number }; player?: { fullName: string } }[];
+    initiatorAssets: any[];
+    receiverAssets: any[];
   };
   onAccept: (tradeId: string) => void;
   onReject: (tradeId: string) => void;
@@ -435,62 +524,86 @@ interface IncomingTradePopupProps {
 
 export function IncomingTradePopup({ trade, onAccept, onReject }: IncomingTradePopupProps) {
   return (
-    <Dialog defaultOpen>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <ArrowLeftRight className="w-5 h-5" />
-            Trade Offer from {trade.initiatorTeam.name}
-          </DialogTitle>
-          <DialogDescription>
-            {trade.initiatorTeam.ownerName} has sent you a trade proposal.
-          </DialogDescription>
-        </DialogHeader>
+    <div className="fixed bottom-6 right-6 z-50 w-[400px] animate-in slide-in-from-right-full fade-in duration-500 ease-out">
+      <Card className="border-2 border-blue-500 shadow-2xl bg-white/95 backdrop-blur-sm overflow-hidden">
+        <CardHeader className="pb-3 bg-slate-50 border-b border-slate-100">
+          <CardTitle className="flex items-center justify-between text-base">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-blue-500 rounded-md">
+                <ArrowLeftRight className="w-4 h-4 text-white" />
+              </div>
+              <span className="font-bold text-slate-900 text-sm">New Trade Offer</span>
+            </div>
+            <Badge variant="outline" className="text-[10px] uppercase tracking-wider bg-blue-50 text-blue-600 border-blue-200">
+              Action Required
+            </Badge>
+          </CardTitle>
+          <CardDescription className="text-[11px] font-medium text-slate-500">
+            {trade.initiatorTeam.name} has sent you a proposal
+          </CardDescription>
+        </CardHeader>
 
-        <div className="grid grid-cols-[1fr,auto,1fr] gap-4 py-4">
-          {/* They offer */}
-          <div>
-            <p className="text-sm font-medium mb-2">They offer:</p>
-            <ul className="space-y-1">
-              {trade.initiatorAssets.map((asset) => (
-                <li key={asset.id} className="text-sm p-2 bg-green-50 dark:bg-green-950 rounded">
-                  {asset.assetType === 'DRAFT_PICK'
-                    ? `Round ${asset.draftPick?.round} Pick`
-                    : asset.player?.fullName}
-                </li>
-              ))}
-            </ul>
+        <CardContent className="p-4">
+          <div className="grid grid-cols-[1fr,auto,1fr] gap-4 items-center">
+            {/* They offer */}
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">You Get</p>
+              <ul className="space-y-1">
+                {trade.initiatorAssets.map((asset) => (
+                  <li key={asset.id} className="text-[11px] font-bold p-1.5 bg-green-50/50 text-green-700 rounded border border-green-100 truncate">
+                    {asset.assetType === 'DRAFT_PICK' && asset.draftPick
+                      ? `R${asset.draftPick.round} Pick`
+                      : asset.assetType === 'FUTURE_PICK'
+                        ? `${asset.futurePickSeason} R${asset.futurePickRound}`
+                        : asset.player?.fullName || 'Player'}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-center">
+              <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center">
+                <ArrowLeftRight className="w-4 h-4 text-slate-400" />
+              </div>
+            </div>
+
+            {/* You give */}
+            <div className="space-y-1.5 text-right">
+              <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">You Give</p>
+              <ul className="space-y-1">
+                {trade.receiverAssets.map((asset) => (
+                  <li key={asset.id} className="text-[11px] font-bold p-1.5 bg-red-50/50 text-red-700 rounded border border-red-100 truncate">
+                    {asset.assetType === 'DRAFT_PICK' && asset.draftPick
+                      ? `R${asset.draftPick.round} Pick`
+                      : asset.assetType === 'FUTURE_PICK'
+                        ? `${asset.futurePickSeason} R${asset.futurePickRound}`
+                        : asset.player?.fullName || 'Player'}
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
+        </CardContent>
 
-          <div className="flex items-center">
-            <ArrowLeftRight className="w-5 h-5 text-muted-foreground" />
-          </div>
-
-          {/* You give */}
-          <div>
-            <p className="text-sm font-medium mb-2">You give:</p>
-            <ul className="space-y-1">
-              {trade.receiverAssets.map((asset) => (
-                <li key={asset.id} className="text-sm p-2 bg-red-50 dark:bg-red-950 rounded">
-                  {asset.assetType === 'DRAFT_PICK'
-                    ? `Round ${asset.draftPick?.round} Pick`
-                    : asset.player?.fullName}
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onReject(trade.tradeId)}>
+        <CardFooter className="p-3 bg-slate-50/80 border-t border-slate-100 flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1 text-xs h-9 font-bold bg-white hover:bg-red-50 hover:text-red-600 hover:border-red-200"
+            onClick={() => onReject(trade.tradeId)}
+          >
             Decline
           </Button>
-          <Button onClick={() => onAccept(trade.tradeId)}>
+          <Button
+            size="sm"
+            className="flex-1 text-xs h-9 font-bold shadow-lg shadow-blue-500/20 bg-blue-600 hover:bg-blue-700"
+            onClick={() => onAccept(trade.tradeId)}
+          >
             Accept Trade
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </CardFooter>
+      </Card>
+    </div>
   );
 }
 

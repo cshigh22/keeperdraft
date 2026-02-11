@@ -19,6 +19,7 @@ import type {
   OrderUpdatedPayload,
   TeamSummary,
   PlayerSummary,
+  RosterPlayer,
   DraftPickSummary,
   ErrorPayload,
 } from '@/types/socket';
@@ -42,10 +43,23 @@ export interface DraftState {
   timerSecondsRemaining: number | null;
   draftOrder: TeamSummary[];
   completedPicks: DraftPickSummary[];
+  allPicks: DraftPickSummary[];
   availablePlayers: PlayerSummary[];
+  teamRosters: Record<string, RosterPlayer[]>;
   pendingTrades: TradeOfferedPayload[];
   totalRounds: number;
   draftType: 'SNAKE' | 'LINEAR';
+  rosterSettings?: {
+    qbCount: number;
+    rbCount: number;
+    wrCount: number;
+    teCount: number;
+    flexCount: number;
+    superflexCount: number;
+    kCount: number;
+    defCount: number;
+    benchCount: number;
+  };
   lastUpdate: Date | null;
   error: ErrorPayload | null;
 }
@@ -79,6 +93,7 @@ interface UseDraftSocketReturn {
     startDraft: () => void;
     pauseDraft: (reason?: string) => void;
     resumeDraft: () => void;
+    resetDraft: () => void;
     forcePick: (playerId: string) => void;
     undoLastPick: () => void;
     updateOrder: (teamOrder: string[]) => void;
@@ -103,7 +118,9 @@ const initialState: DraftState = {
   timerSecondsRemaining: null,
   draftOrder: [],
   completedPicks: [],
+  allPicks: [],
   availablePlayers: [],
+  teamRosters: {},
   pendingTrades: [],
   totalRounds: 14,
   draftType: 'SNAKE',
@@ -222,7 +239,9 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
         timerSecondsRemaining: payload.timerSecondsRemaining,
         draftOrder: payload.draftOrder,
         completedPicks: payload.completedPicks,
+        allPicks: payload.allPicks,
         availablePlayers: payload.availablePlayers,
+        teamRosters: payload.teamRosters,
         pendingTrades: payload.pendingTrades,
         totalRounds: payload.totalRounds || 14,
         draftType: payload.draftType || 'SNAKE',
@@ -302,6 +321,17 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
           currentRound: payload.nextPick?.round || prev.currentRound,
           currentTeamId: payload.nextPick?.teamId || null,
           currentTeam: payload.nextPick?.team || null,
+          teamRosters: payload.teamRosterUpdates
+            ? { ...prev.teamRosters, ...payload.teamRosterUpdates }
+            : prev.teamRosters,
+          allPicks: (() => {
+            const pickMap = new Map(prev.allPicks.map((p) => [p.id, p]));
+            pickMap.set(payload.pick.id, payload.pick);
+            return Array.from(pickMap.values()).sort((a, b) => {
+              if (a.season !== b.season) return a.season - b.season;
+              return a.overallPickNumber - b.overallPickNumber;
+            });
+          })(),
           lastUpdate: new Date(),
         };
       });
@@ -332,6 +362,12 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
           completedPicks: newCompletedPicks,
           currentPick: payload.pickNumber,
           currentTeamId: payload.revertedToTeamId,
+          teamRosters: payload.teamRosterUpdates
+            ? { ...prev.teamRosters, ...payload.teamRosterUpdates }
+            : prev.teamRosters,
+          allPicks: prev.allPicks.map((p) =>
+            p.id === payload.pickId ? { ...p, isComplete: false, selectedPlayer: undefined, selectedAt: undefined } : p
+          ),
           lastUpdate: new Date(),
         };
       });
@@ -372,9 +408,33 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
         pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== payload.tradeId),
         isPaused: payload.draftPaused ? true : prev.isPaused,
         pauseReason: payload.pauseReason || prev.pauseReason,
+        teamRosters: payload.teamRosterUpdates
+          ? { ...prev.teamRosters, ...payload.teamRosterUpdates }
+          : prev.teamRosters,
+        allPicks: payload.updatedDraftOrder
+          ? (() => {
+            const pickMap = new Map(prev.allPicks.map((p) => [p.id, p]));
+            payload.updatedDraftOrder.forEach((updated) => {
+              const existing = pickMap.get(updated.id);
+              pickMap.set(updated.id, existing ? { ...existing, ...updated } : updated);
+            });
+            return Array.from(pickMap.values()).sort((a, b) => {
+              if (a.season !== b.season) return a.season - b.season;
+              return a.overallPickNumber - b.overallPickNumber;
+            });
+          })()
+          : prev.allPicks,
         lastUpdate: new Date(),
       }));
       callbacks.current.onTradeAccepted?.(payload);
+    });
+
+    socket.on(SocketEvents.DRAFT_RESET, (payload: StateSyncPayload) => {
+      setState((prev) => ({
+        ...prev,
+        ...payload,
+        lastUpdate: new Date(),
+      }));
     });
 
     socket.on(SocketEvents.TRADE_REJECTED, (payload) => {
@@ -463,6 +523,11 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
     resumeDraft: useCallback(() => {
       if (!socketRef.current) return;
       socketRef.current.emit(SocketEvents.DRAFT_RESUME, { leagueId });
+    }, [leagueId]),
+
+    resetDraft: useCallback(() => {
+      if (!socketRef.current) return;
+      socketRef.current.emit(SocketEvents.DRAFT_RESET, { leagueId });
     }, [leagueId]),
 
     forcePick: useCallback((playerId: string) => {

@@ -139,6 +139,10 @@ export const CommissionerService = {
         const draftType = settings?.draftType || 'SNAKE';
         const season = new Date().getFullYear();
 
+        if (totalRounds < 1) {
+          throw new Error('Total rounds must be at least 1');
+        }
+
         const picks: {
           leagueId: string;
           season: number;
@@ -158,8 +162,8 @@ export const CommissionerService = {
           switch (draftType) {
             case 'SNAKE':
               // Even rounds are reversed
-              orderForRound = round % 2 === 0 
-                ? [...teamOrderList].reverse() 
+              orderForRound = round % 2 === 0
+                ? [...teamOrderList].reverse()
                 : teamOrderList;
               break;
             case 'LINEAR':
@@ -171,8 +175,8 @@ export const CommissionerService = {
               // Round 1: normal, Round 2: reversed, Round 3: reversed, Round 4: normal, etc.
               const cycle = Math.floor((round - 1) / 2) % 2;
               const isReversedRound = round > 1 && (round === 2 || round === 3 || cycle === 1);
-              orderForRound = isReversedRound 
-                ? [...teamOrderList].reverse() 
+              orderForRound = isReversedRound
+                ? [...teamOrderList].reverse()
                 : teamOrderList;
               break;
             default:
@@ -181,6 +185,8 @@ export const CommissionerService = {
 
           for (let pickInRound = 1; pickInRound <= teamOrderList.length; pickInRound++) {
             const teamId = orderForRound[pickInRound - 1];
+            if (!teamId) continue;
+
             picks.push({
               leagueId,
               season,
@@ -245,7 +251,11 @@ export const CommissionerService = {
     const teamIds = league.teams.map((t) => t.id);
     for (let i = teamIds.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [teamIds[i], teamIds[j]] = [teamIds[j], teamIds[i]];
+      const temp = teamIds[i];
+      if (temp !== undefined) {
+        teamIds[i] = teamIds[j]!;
+        teamIds[j] = temp;
+      }
     }
 
     return this.setDraftOrder({

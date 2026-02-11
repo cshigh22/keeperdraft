@@ -272,6 +272,29 @@ io.on(SocketEvents.CONNECTION, (socket) => {
     await manager.resumeDraft();
   });
 
+  socket.on(SocketEvents.DRAFT_RESET, async (payload) => {
+    const { leagueId } = payload;
+
+    if (!socket.data.isCommissioner) {
+      socket.emit(SocketEvents.ERROR, {
+        code: 'UNAUTHORIZED',
+        message: 'Only the commissioner can reset the draft',
+      });
+      return;
+    }
+
+    try {
+      const manager = getDraftManager(leagueId);
+      await manager.resetDraft();
+    } catch (error: any) {
+      console.error('Error resetting draft:', error);
+      socket.emit(SocketEvents.ERROR, {
+        code: 'RESET_FAILED',
+        message: error.message || 'Failed to reset draft',
+      });
+    }
+  });
+
   // -------------------------------------------------------------------------
   // PICK MADE
   // -------------------------------------------------------------------------
@@ -474,6 +497,20 @@ io.on(SocketEvents.CONNECTION, (socket) => {
       // Process the trade atomically
       const result = await tradeProcessor.acceptTrade(tradeId, socket.data.isCommissioner);
 
+      // Clear cached state so syncCurrentTeam reads fresh DB data
+      // (the cache was populated earlier in this handler and is now stale)
+      manager.clearStateCache();
+
+      // Sync current team in case the current pick was traded
+      const newTeamId = await manager.syncCurrentTeam();
+      console.log(`[TRADE_ACCEPTED] syncCurrentTeam returned: ${newTeamId} (was: ${draftState.currentTeamId})`);
+
+      // Get updated rosters for the teams involved
+      const [initiatorRoster, receiverRoster] = await Promise.all([
+        manager.getTeamRoster(result.initiatorTeam.id),
+        manager.getTeamRoster(result.receiverTeam.id),
+      ]);
+
       // Build the payload
       const acceptedPayload: TradeAcceptedPayload = {
         leagueId,
@@ -483,6 +520,10 @@ io.on(SocketEvents.CONNECTION, (socket) => {
         initiatorAssets: result.initiatorAssets,
         receiverAssets: result.receiverAssets,
         updatedDraftOrder: result.updatedPicks,
+        teamRosterUpdates: {
+          [result.initiatorTeam.id]: initiatorRoster,
+          [result.receiverTeam.id]: receiverRoster,
+        },
         draftPaused: shouldPause,
         pauseReason: shouldPause ? 'Trade completed - draft paused for review' : undefined,
         timestamp: new Date().toISOString(),
@@ -490,6 +531,11 @@ io.on(SocketEvents.CONNECTION, (socket) => {
 
       // Broadcast trade accepted
       io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_ACCEPTED, acceptedPayload);
+
+      // Send full state sync to ensure all clients have accurate state
+      // (especially currentTeamId if the pick was traded)
+      const fullState = await manager.getFullState();
+      io.to(getRoomName(leagueId)).emit(SocketEvents.STATE_SYNC, fullState);
 
       // Log the activity
       await prisma.draftActivityLog.create({

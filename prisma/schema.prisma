@@ -209,6 +209,15 @@ model DraftSettings {
   reserveTimeSeconds   Int       @default(120)
   pauseOnTrade         Boolean   @default(true)
   maxKeepers           Int       @default(7)
+  qbCount              Int       @default(1)
+  rbCount              Int       @default(2)
+  wrCount              Int       @default(3)
+  teCount              Int       @default(1)
+  flexCount            Int       @default(2)
+  superflexCount       Int       @default(0)
+  kCount               Int       @default(1)
+  defCount             Int       @default(1)
+  benchCount           Int       @default(9)
   keeperDeadline       DateTime?
   scheduledStartTime   DateTime?
   createdAt            DateTime  @default(now())

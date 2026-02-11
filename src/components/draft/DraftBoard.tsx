@@ -23,6 +23,7 @@ import type { TeamSummary, DraftPickSummary } from '@/types/socket';
 interface DraftBoardProps {
   teams: TeamSummary[];
   completedPicks: DraftPickSummary[];
+  allPicks: DraftPickSummary[];
   totalRounds: number;
   currentPick: number;
   currentTeamId: string | null;
@@ -47,12 +48,12 @@ interface PickCellProps {
 // ============================================================================
 
 const positionColors: Record<string, { bg: string; text: string; border: string }> = {
-  QB: { bg: 'bg-red-100 dark:bg-red-950', text: 'text-red-700 dark:text-red-300', border: 'border-red-300' },
-  RB: { bg: 'bg-green-100 dark:bg-green-950', text: 'text-green-700 dark:text-green-300', border: 'border-green-300' },
-  WR: { bg: 'bg-blue-100 dark:bg-blue-950', text: 'text-blue-700 dark:text-blue-300', border: 'border-blue-300' },
-  TE: { bg: 'bg-orange-100 dark:bg-orange-950', text: 'text-orange-700 dark:text-orange-300', border: 'border-orange-300' },
-  K: { bg: 'bg-purple-100 dark:bg-purple-950', text: 'text-purple-700 dark:text-purple-300', border: 'border-purple-300' },
-  DEF: { bg: 'bg-gray-100 dark:bg-gray-800', text: 'text-gray-700 dark:text-gray-300', border: 'border-gray-300' },
+  QB: { bg: 'bg-pink-500/20', text: 'text-pink-500', border: 'border-pink-500/30' },
+  RB: { bg: 'bg-blue-500/20', text: 'text-blue-500', border: 'border-blue-500/30' },
+  WR: { bg: 'bg-green-500/20', text: 'text-green-500', border: 'border-green-500/30' },
+  TE: { bg: 'bg-yellow-500/20', text: 'text-yellow-500', border: 'border-yellow-500/30' },
+  K: { bg: 'bg-gray-500/20', text: 'text-gray-500', border: 'border-gray-500/30' },
+  DEF: { bg: 'bg-purple-500/20', text: 'text-purple-500', border: 'border-purple-500/30' },
 };
 
 function getPositionStyle(position?: string) {
@@ -82,19 +83,18 @@ function PickCell({
         <TooltipTrigger asChild>
           <div
             className={cn(
-              'relative h-20 min-w-[140px] rounded-lg border-2 p-2 transition-all duration-200',
-              // Base styles
-              'flex flex-col justify-between',
+              'relative h-20 min-w-[140px] rounded border transition-all duration-200',
+              'flex flex-col justify-between p-2',
               // Empty pick
-              !isFilled && 'bg-muted/50 border-muted-foreground/20',
+              !isFilled && 'bg-slate-50 border-slate-200',
               // Filled pick with position color
               isFilled && positionStyle?.bg,
               isFilled && positionStyle?.border,
               // Current pick highlight
-              isCurrentPick && !isPaused && 'ring-2 ring-primary ring-offset-2 animate-pulse',
-              isCurrentPick && isPaused && 'ring-2 ring-yellow-500 ring-offset-2',
+              isCurrentPick && !isPaused && 'ring-1 ring-blue-500 ring-offset-2 ring-offset-white animate-pulse',
+              isCurrentPick && isPaused && 'ring-1 ring-yellow-500 ring-offset-2 ring-offset-white',
               // My team highlight
-              isMyTeam && !isFilled && 'border-primary/50 bg-primary/5',
+              isMyTeam && !isFilled && 'border-blue-500/30 bg-blue-500/5',
               // Traded pick indicator
               isTraded && 'border-dashed'
             )}
@@ -115,31 +115,30 @@ function PickCell({
             {isFilled ? (
               // Filled pick - show player
               <div className="flex-1 flex flex-col justify-center">
-                <div className="flex items-center gap-1">
-                  <Badge 
-                    className={cn(
-                      'text-[10px] font-bold px-1',
-                      positionStyle?.bg,
-                      positionStyle?.text
-                    )}
-                  >
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className={cn(
+                    "w-8 py-0.5 rounded-sm text-[8px] font-black border text-center uppercase",
+                    positionStyle?.bg,
+                    positionStyle?.text,
+                    positionStyle?.border
+                  )}>
                     {pick.selectedPlayer?.position}
-                  </Badge>
-                  <span className="text-xs text-muted-foreground">
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-bold uppercase">
                     {pick.selectedPlayer?.nflTeam || 'FA'}
                   </span>
                 </div>
-                <p className="font-semibold text-sm truncate mt-0.5">
+                <p className="font-bold text-[11px] truncate text-slate-900 leading-tight">
                   {pick.selectedPlayer?.fullName}
                 </p>
               </div>
             ) : (
               // Empty pick - show team
               <div className="flex-1 flex flex-col justify-center">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-[10px] text-slate-500 font-bold uppercase mb-0.5">
                   {team.ownerName}
                 </p>
-                <p className="font-medium text-sm truncate">
+                <p className="font-medium text-xs truncate text-slate-400">
                   {team.name}
                 </p>
               </div>
@@ -180,13 +179,10 @@ function PickCell({
   );
 }
 
-// ============================================================================
-// DRAFT BOARD COMPONENT
-// ============================================================================
-
 export function DraftBoard({
   teams,
   completedPicks,
+  allPicks,
   totalRounds,
   currentPick,
   currentTeamId,
@@ -195,51 +191,64 @@ export function DraftBoard({
   myTeamId,
 }: DraftBoardProps) {
   // Build pick grid - maps each cell to a pick
+  const fullPickMap = useMemo(() => {
+    return new Map(allPicks.map((p) => [p.overallPickNumber, p]));
+  }, [allPicks]);
+
+  const teamMap = useMemo(() => {
+    return new Map(teams.map((t) => [t.id, t]));
+  }, [teams]);
+
   const pickGrid = useMemo(() => {
     const grid: (DraftPickSummary | null)[][] = [];
-    const pickMap = new Map(completedPicks.map((p) => [p.overallPickNumber, p]));
     const teamCount = teams.length;
 
     for (let round = 1; round <= totalRounds; round++) {
       const roundPicks: (DraftPickSummary | null)[] = [];
-      
+
       for (let position = 1; position <= teamCount; position++) {
         // Calculate overall pick number based on draft type
         let overallPick: number;
-        
+
         if (draftType === 'SNAKE') {
-          // Snake: odd rounds go 1-N, even rounds go N-1
           if (round % 2 === 1) {
             overallPick = (round - 1) * teamCount + position;
           } else {
             overallPick = (round - 1) * teamCount + (teamCount - position + 1);
           }
         } else {
-          // Linear: always 1-N
           overallPick = (round - 1) * teamCount + position;
         }
 
-        roundPicks.push(pickMap.get(overallPick) || null);
+        roundPicks.push(fullPickMap.get(overallPick) || null);
       }
 
       grid.push(roundPicks);
     }
 
     return grid;
-  }, [completedPicks, teams.length, totalRounds, draftType]);
+  }, [fullPickMap, teams.length, totalRounds, draftType]);
 
   // Calculate which team has each pick
-  const getTeamForPick = (round: number, position: number): TeamSummary => {
-    if (draftType === 'SNAKE' && round % 2 === 0) {
-      // Reverse order for even rounds in snake
-      const team = teams[teams.length - position];
-      return team ?? teams[0]!;
+  const getTeamForPick = (overallPickNumber: number): TeamSummary => {
+    const pick = fullPickMap.get(overallPickNumber);
+    if (pick) {
+      const owner = teamMap.get(pick.currentOwnerId);
+      if (owner) return owner;
     }
-    const team = teams[position - 1];
-    return team ?? teams[0]!;
+
+    // Fallback to original calculation if pick not found (shouldn't happen)
+    const teamCount = teams.length;
+    const round = Math.ceil(overallPickNumber / teamCount);
+    const position = overallPickNumber % teamCount || teamCount;
+
+    if (draftType === 'SNAKE' && round % 2 === 0) {
+      return teams[teamCount - position] || teams[0]!;
+    }
+    return teams[position - 1] || teams[0]!;
   };
 
-  // Calculate overall pick number
+  // Calculate overall pick number helper
   const getOverallPick = (round: number, position: number): number => {
     const teamCount = teams.length;
     if (draftType === 'SNAKE') {
@@ -263,7 +272,7 @@ export function DraftBoard({
   }
 
   return (
-    <Card className="flex-1">
+    <div className="flex-1 bg-white border-none shadow-none overflow-hidden flex flex-col h-full">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">Draft Board</CardTitle>
@@ -276,7 +285,7 @@ export function DraftBoard({
             </Badge>
           </div>
         </div>
-        
+
         {/* Position Legend */}
         <div className="flex flex-wrap gap-2 mt-2">
           {Object.entries(positionColors).map(([pos, style]) => (
@@ -292,18 +301,18 @@ export function DraftBoard({
         <ScrollArea className="w-full">
           <div className="p-4">
             {/* Header row - Team names */}
-            <div className="flex gap-2 mb-2 sticky top-0 bg-background z-10 pb-2 border-b">
+            <div className="flex gap-2 mb-4 sticky top-0 bg-white z-20 pb-2 border-b border-slate-200">
               <div className="w-16 flex-shrink-0" /> {/* Round label spacer */}
               {teams.map((team) => (
                 <div
                   key={team.id}
                   className={cn(
-                    'min-w-[140px] text-center p-2 rounded-lg',
-                    team.id === myTeamId && 'bg-primary/10 border border-primary/30'
+                    'min-w-[140px] text-center p-2 rounded',
+                    team.id === myTeamId && 'bg-blue-50 border border-blue-200 shadow-sm'
                   )}
                 >
-                  <p className="font-semibold text-sm truncate">{team.name}</p>
-                  <p className="text-xs text-muted-foreground truncate">
+                  <p className="font-bold text-xs truncate text-slate-900">{team.name.toUpperCase()}</p>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase mt-0.5">
                     {team.ownerName}
                   </p>
                 </div>
@@ -327,13 +336,13 @@ export function DraftBoard({
                   {/* Picks in round */}
                   {teams.map((_, teamIndex) => {
                     const position = teamIndex + 1;
-                    const displayPosition = isReversed 
-                      ? teams.length - teamIndex 
+                    const displayPosition = isReversed
+                      ? teams.length - teamIndex
                       : position;
-                    const team = getTeamForPick(round, displayPosition);
                     const overallPick = getOverallPick(round, displayPosition);
+                    const team = getTeamForPick(overallPick);
                     const pick = roundPicks[teamIndex] ?? null;
-                    const isTraded = pick 
+                    const isTraded = pick
                       ? pick.originalOwnerId !== pick.currentOwnerId
                       : false;
 
@@ -358,7 +367,7 @@ export function DraftBoard({
           <ScrollBar orientation="horizontal" />
         </ScrollArea>
       </CardContent>
-    </Card>
+    </div>
   );
 }
 

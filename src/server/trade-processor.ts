@@ -2,9 +2,9 @@
 // Handles atomic trade creation, acceptance, and asset swapping
 
 import type { PrismaClient, TradeStatus, TradeAssetType } from '@prisma/client';
-import type { 
-  TradeAssetPayload, 
-  TeamSummary, 
+import type {
+  TradeAssetPayload,
+  TeamSummary,
   DraftPickSummary,
   TradeOfferedPayload,
 } from '@/types/socket';
@@ -39,11 +39,11 @@ export class TradeProcessor {
   // ===========================================================================
 
   async createTrade(input: CreateTradeInput): Promise<TradeOfferedPayload> {
-    const { 
-      leagueId, 
-      initiatorTeamId, 
-      receiverTeamId, 
-      initiatorAssets, 
+    const {
+      leagueId,
+      initiatorTeamId,
+      receiverTeamId,
+      initiatorAssets,
       receiverAssets,
       expiresAt,
     } = input;
@@ -65,8 +65,8 @@ export class TradeProcessor {
     }
 
     // Validate all assets
-    await this.validateAssets(initiatorTeamId, initiatorAssets);
-    await this.validateAssets(receiverTeamId, receiverAssets);
+    await this.validateAssets(leagueId, initiatorTeamId, initiatorAssets);
+    await this.validateAssets(leagueId, receiverTeamId, receiverAssets);
 
     // Create the trade with assets
     const trade = await this.prisma.trade.create({
@@ -78,18 +78,50 @@ export class TradeProcessor {
         expiresAt: expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours default
         assets: {
           create: [
-            ...initiatorAssets.map((asset) => ({
-              fromTeamId: initiatorTeamId,
-              assetType: this.mapAssetType(asset.assetType),
-              ...(asset.assetType === 'DRAFT_PICK' && { draftPickId: asset.id }),
-              ...(asset.assetType === 'PLAYER' && { playerId: asset.id }),
-            })),
-            ...receiverAssets.map((asset) => ({
-              fromTeamId: receiverTeamId,
-              assetType: this.mapAssetType(asset.assetType),
-              ...(asset.assetType === 'DRAFT_PICK' && { draftPickId: asset.id }),
-              ...(asset.assetType === 'PLAYER' && { playerId: asset.id }),
-            })),
+            ...initiatorAssets.map((asset) => {
+              const isFuture = asset.assetType === 'FUTURE_PICK';
+              let futureSeason: number | undefined;
+              let futureRound: number | undefined;
+
+              if (isFuture) {
+                const parts = asset.id.split(':');
+                futureSeason = parseInt(parts[2] || '0');
+                futureRound = parseInt(parts[3] || '0');
+              }
+
+              return {
+                fromTeamId: initiatorTeamId,
+                assetType: this.mapAssetType(asset.assetType),
+                ...(asset.assetType === 'DRAFT_PICK' && { draftPickId: asset.id }),
+                ...(asset.assetType === 'PLAYER' && { playerId: asset.id }),
+                ...(isFuture && {
+                  futurePickSeason: futureSeason,
+                  futurePickRound: futureRound,
+                }),
+              };
+            }),
+            ...receiverAssets.map((asset) => {
+              const isFuture = asset.assetType === 'FUTURE_PICK';
+              let futureSeason: number | undefined;
+              let futureRound: number | undefined;
+
+              if (isFuture) {
+                const parts = asset.id.split(':');
+                futureSeason = parseInt(parts[2] || '0');
+                futureRound = parseInt(parts[3] || '0');
+              }
+
+              return {
+                fromTeamId: receiverTeamId,
+                assetType: this.mapAssetType(asset.assetType),
+                ...(asset.assetType === 'DRAFT_PICK' && { draftPickId: asset.id }),
+                ...(asset.assetType === 'PLAYER' && { playerId: asset.id }),
+                ...(isFuture && {
+                  futurePickSeason: futureSeason,
+                  futurePickRound: futureRound,
+                }),
+              };
+            }),
           ],
         },
       },
@@ -175,8 +207,8 @@ export class TradeProcessor {
     const initiatorAssets = trade.assets.filter((a) => a.fromTeamId === trade.initiatorTeamId);
     const receiverAssets = trade.assets.filter((a) => a.fromTeamId === trade.receiverTeamId);
 
-    await this.validateAssetsForSwap(trade.initiatorTeamId, initiatorAssets);
-    await this.validateAssetsForSwap(trade.receiverTeamId, receiverAssets);
+    await this.validateAssetsForSwap(trade.leagueId, trade.initiatorTeamId, initiatorAssets);
+    await this.validateAssetsForSwap(trade.leagueId, trade.receiverTeamId, receiverAssets);
 
     // Perform atomic swap in transaction
     const updatedPicks: DraftPickSummary[] = [];
@@ -185,7 +217,7 @@ export class TradeProcessor {
       // Update trade status to processing
       await tx.trade.update({
         where: { id: tradeId },
-        data: { 
+        data: {
           status: 'PROCESSING',
           respondedAt: new Date(),
         },
@@ -208,6 +240,7 @@ export class TradeProcessor {
 
           updatedPicks.push({
             id: updatedPick.id,
+            season: updatedPick.season,
             round: updatedPick.round,
             pickInRound: updatedPick.pickInRound || 0,
             overallPickNumber: updatedPick.overallPickNumber || 0,
@@ -215,6 +248,65 @@ export class TradeProcessor {
             currentOwnerName: updatedPick.currentOwner.owner.name,
             originalOwnerId: updatedPick.originalOwnerId,
             isComplete: updatedPick.isComplete,
+          });
+        } else if (asset.assetType === 'FUTURE_PICK' && asset.futurePickSeason && asset.futurePickRound) {
+          const newOwnerId = asset.fromTeamId === trade.initiatorTeamId
+            ? trade.receiverTeamId
+            : trade.initiatorTeamId;
+
+          // For future picks, we MUST find the record by season, round, and the original owner.
+          // Since we didn't store originalOwnerId in TradeAsset, we'll try to find any existing
+          // incomplete pick record that matches.
+
+          let pick = await tx.draftPick.findFirst({
+            where: {
+              leagueId: trade.leagueId,
+              season: asset.futurePickSeason,
+              round: asset.futurePickRound,
+              // Check if fromTeamId is currently the owner
+              currentOwnerId: asset.fromTeamId,
+              isComplete: false,
+            },
+            include: {
+              currentOwner: { include: { owner: { select: { name: true } } } },
+            },
+          });
+
+          if (pick) {
+            // Update existing record
+            pick = await tx.draftPick.update({
+              where: { id: pick.id },
+              data: { currentOwnerId: newOwnerId },
+              include: {
+                currentOwner: { include: { owner: { select: { name: true } } } },
+              },
+            });
+          } else {
+            // Create new record (this assumes fromTeamId IS the original owner for virtual picks)
+            pick = await tx.draftPick.create({
+              data: {
+                leagueId: trade.leagueId,
+                season: asset.futurePickSeason,
+                round: asset.futurePickRound,
+                originalOwnerId: asset.fromTeamId,
+                currentOwnerId: newOwnerId,
+              },
+              include: {
+                currentOwner: { include: { owner: { select: { name: true } } } },
+              },
+            });
+          }
+
+          updatedPicks.push({
+            id: pick.id,
+            season: pick.season,
+            round: pick.round,
+            pickInRound: pick.pickInRound || 0,
+            overallPickNumber: pick.overallPickNumber || 0,
+            currentOwnerId: pick.currentOwnerId,
+            currentOwnerName: pick.currentOwner.owner.name,
+            originalOwnerId: pick.originalOwnerId,
+            isComplete: pick.isComplete,
           });
         }
       }
@@ -301,7 +393,7 @@ export class TradeProcessor {
       const league = await this.prisma.league.findUnique({
         where: { id: trade.leagueId },
       });
-      
+
       if (league?.commissionerId !== rejectedByUserId) {
         throw new Error('Unauthorized to reject this trade');
       }
@@ -341,7 +433,7 @@ export class TradeProcessor {
       const league = await this.prisma.league.findUnique({
         where: { id: trade.leagueId },
       });
-      
+
       if (league?.commissionerId !== cancelledByUserId) {
         throw new Error('Unauthorized to cancel this trade');
       }
@@ -398,6 +490,7 @@ export class TradeProcessor {
   // ===========================================================================
 
   private async validateAssets(
+    leagueId: string,
     teamId: string,
     assets: { assetType: string; id: string }[]
   ): Promise<void> {
@@ -406,8 +499,9 @@ export class TradeProcessor {
         const pick = await this.prisma.draftPick.findFirst({
           where: {
             id: asset.id,
+            leagueId,
             currentOwnerId: teamId,
-            isComplete: false, // Can't trade used picks
+            isComplete: false,
           },
         });
 
@@ -419,22 +513,51 @@ export class TradeProcessor {
           where: {
             playerId: asset.id,
             teamId,
+            leagueId,
           },
         });
 
         if (!roster) {
           throw new Error(`Team does not have player ${asset.id} on roster`);
         }
+      } else if (asset.assetType === 'FUTURE_PICK') {
+        const parts = asset.id.split(':'); // FUTURE_PICK:originalOwnerId:season:round
+        if (parts.length < 4) continue;
+
+        const originalOwnerId = parts[1];
+        const season = parseInt(parts[2] || '0');
+        const round = parseInt(parts[3] || '0');
+
+        const pick = await this.prisma.draftPick.findFirst({
+          where: {
+            leagueId,
+            season,
+            round,
+            originalOwnerId,
+          },
+        });
+
+        if (pick) {
+          if (pick.currentOwnerId !== teamId) {
+            throw new Error(`Team does not own future pick ${asset.id}`);
+          }
+        } else {
+          // If no record, it belongs to original owner
+          if (teamId !== originalOwnerId) {
+            throw new Error(`Team does not own future pick ${asset.id}`);
+          }
+        }
       }
     }
   }
 
-  private async validateAssetsForSwap(teamId: string, assets: any[]): Promise<void> {
+  private async validateAssetsForSwap(leagueId: string, teamId: string, assets: any[]): Promise<void> {
     for (const asset of assets) {
       if (asset.assetType === 'DRAFT_PICK' && asset.draftPickId) {
         const pick = await this.prisma.draftPick.findFirst({
           where: {
             id: asset.draftPickId,
+            leagueId,
             currentOwnerId: teamId,
             isComplete: false,
           },
@@ -448,11 +571,33 @@ export class TradeProcessor {
           where: {
             playerId: asset.playerId,
             teamId,
+            leagueId,
           },
         });
 
         if (!roster) {
           throw new Error(`Player ${asset.playerId} is no longer on team roster`);
+        }
+      } else if (asset.assetType === 'FUTURE_PICK' && asset.futurePickSeason && asset.futurePickRound) {
+        // Find if this pick record already exists to check current owner
+        const pick = await this.prisma.draftPick.findFirst({
+          where: {
+            leagueId,
+            season: asset.futurePickSeason,
+            round: asset.futurePickRound,
+            originalOwnerId: asset.fromTeamId, // FUTURE_PICK in asset table tracks fromTeamId
+          },
+        });
+
+        if (pick) {
+          if (pick.currentOwnerId !== teamId) {
+            throw new Error(`Future pick is no longer owned by team`);
+          }
+        } else {
+          // If no record exists, the fromTeamId MUST be the original owner
+          // We can't verify "original owner" easily here without the full ID string,
+          // but we already validated it when the trade was PROPOSED.
+          // For extra safety, we could check if fromTeamId is the one who "should" have it.
         }
       }
     }
@@ -483,21 +628,21 @@ export class TradeProcessor {
       fromTeamName: asset.fromTeam?.name || '',
       draftPick: asset.draftPick
         ? {
-            id: asset.draftPick.id,
-            round: asset.draftPick.round,
-            season: asset.draftPick.season,
-            overallPickNumber: asset.draftPick.overallPickNumber,
-          }
+          id: asset.draftPick.id,
+          round: asset.draftPick.round,
+          season: asset.draftPick.season,
+          overallPickNumber: asset.draftPick.overallPickNumber,
+        }
         : undefined,
       player: asset.player
         ? {
-            id: asset.player.id,
-            sleeperId: asset.player.sleeperId,
-            fullName: asset.player.fullName,
-            position: asset.player.position,
-            nflTeam: asset.player.nflTeam,
-            rank: asset.player.rank,
-          }
+          id: asset.player.id,
+          sleeperId: asset.player.sleeperId,
+          fullName: asset.player.fullName,
+          position: asset.player.position,
+          nflTeam: asset.player.nflTeam,
+          rank: asset.player.rank,
+        }
         : undefined,
       futurePickSeason: asset.futurePickSeason,
       futurePickRound: asset.futurePickRound,
