@@ -18,6 +18,7 @@ import {
 import { DraftBoard } from '@/components/draft/DraftBoard';
 import { PlayerPool } from '@/components/draft/PlayerPool';
 import { SidebarRoster } from '@/components/draft/SidebarRoster';
+import { DraftTimer } from '@/components/draft/DraftTimer';
 import { TradeModal, IncomingTradePopup } from '@/components/trade/TradeModal';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
 import { TeamRosters } from '@/components/draft/TeamRosters';
@@ -162,6 +163,11 @@ export default function DraftRoom() {
                       {state.currentTeam?.name || '-'}
                     </p>
                   </div>
+                  <Separator orientation="vertical" className="h-8" />
+                  <DraftTimer
+                    secondsRemaining={state.timerSecondsRemaining}
+                    isPaused={state.isPaused}
+                  />
                 </>
               )}
             </div>
