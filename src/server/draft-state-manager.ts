@@ -342,38 +342,39 @@ export class DraftStateManager {
   }
 
   private async getAvailablePlayers(): Promise<PlayerSummary[]> {
-    // Get all drafted player IDs in this league
-    const draftedPlayerIds = await this.prisma.draftPick.findMany({
-      where: {
-        leagueId: this.leagueId,
-        isComplete: true,
-        selectedPlayerId: { not: null },
-      },
-      select: { selectedPlayerId: true },
-    });
+    // Get IDs of players to exclude (drafted or kept)
+    const [draftedPicks, keeperRosters] = await Promise.all([
+      this.prisma.draftPick.findMany({
+        where: {
+          leagueId: this.leagueId,
+          isComplete: true,
+          selectedPlayerId: { not: null },
+        },
+        select: { selectedPlayerId: true },
+      }),
+      this.prisma.playerRoster.findMany({
+        where: {
+          leagueId: this.leagueId,
+          isKeeper: true,
+        },
+        select: { playerId: true, team: { select: { name: true } } },
+      }),
+    ]);
 
-    const draftedIds = draftedPlayerIds
-      .map((p) => p.selectedPlayerId)
-      .filter((id): id is string => id !== null);
-
-    // Get keeper player IDs with their team names
-    const keeperRosters = await this.prisma.playerRoster.findMany({
-      where: {
-        leagueId: this.leagueId,
-        isKeeper: true,
-      },
-      select: { playerId: true, team: { select: { name: true } } },
-    });
+    const excludeIds = [
+      ...draftedPicks.map((p) => p.selectedPlayerId as string),
+      ...keeperRosters.map((k) => k.playerId),
+    ];
 
     const keeperMap = new Map<string, string>();
     for (const k of keeperRosters) {
       keeperMap.set(k.playerId, k.team.name);
     }
 
-    // Exclude only drafted players (keepers will be included but marked)
+    // Exclude both drafted and kept players
     const players = await this.prisma.player.findMany({
       where: {
-        id: { notIn: draftedIds },
+        id: { notIn: excludeIds },
         status: 'ACTIVE',
       },
       orderBy: { rank: 'asc' },
@@ -472,6 +473,15 @@ export class DraftStateManager {
   // ===========================================================================
 
   async startDraft(): Promise<void> {
+    console.log(`[DraftStateManager] Starting draft for league ${this.leagueId}...`);
+
+    // 1. Check current status
+    const state = await this.getCurrentState();
+    if (state.status !== 'NOT_STARTED') {
+      console.warn(`[DraftStateManager] Cannot start draft - current status is ${state.status}`);
+      throw new Error(`Draft cannot be started because it is currently ${state.status}`);
+    }
+
     const settings = await this.prisma.draftSettings.findUnique({
       where: { leagueId: this.leagueId },
     });
@@ -480,182 +490,189 @@ export class DraftStateManager {
       throw new Error('Draft settings not configured');
     }
 
-    // Get teams in draft order
-    const teams = await this.getTeamsWithOrder();
-    if (teams.length === 0) {
-      throw new Error('No teams in league');
-    }
+    // Clear cache immediately to prevent stale reads
+    this.clearStateCache();
 
-    // Verify draft picks exist and find who owns pick #1
-    // (may differ from teams[0] if picks were traded pre-draft)
-    // PROCESS KEEPERS: Mark keeper picks as complete
-    // PROCESS KEEPERS: Mark keeper picks as complete
-    const allKeepers = await this.prisma.playerRoster.findMany({
-      where: {
-        leagueId: this.leagueId,
-        isKeeper: true,
-      },
-    });
-
-    if (allKeepers.length > 0) {
-      console.log(`[startDraft] Processing ${allKeepers.length} keepers...`);
-
-      // 1. Process Cost Keepers First (Specific Rounds)
-      const costKeepers = allKeepers.filter(k => k.keeperRound !== null && k.keeperRound > 0);
-
-      for (const keeper of costKeepers) {
-        // Find the pick for this team in the specified round
-        const pick = await this.prisma.draftPick.findFirst({
-          where: {
-            leagueId: this.leagueId,
-            round: keeper.keeperRound!,
-            currentOwnerId: keeper.teamId,
-            isComplete: false,
-          },
-        });
-
-        if (pick) {
-          await this.prisma.draftPick.update({
-            where: { id: pick.id },
-            data: {
-              isComplete: true,
-              selectedPlayerId: keeper.playerId,
-              selectedAt: new Date(),
-              isAutoPick: false,
-            },
-          });
-          console.log(`[startDraft] Keeper processed: Team ${keeper.teamId} kept Player ${keeper.playerId} in Round ${keeper.keeperRound} (Pick ${pick.overallPickNumber})`);
-        } else {
-          console.warn(`[startDraft] WARNING: Could not find available pick for keeper (Team ${keeper.teamId}, Round ${keeper.keeperRound}). Keeper selection ignored.`);
-        }
+    try {
+      // Get teams in draft order
+      const teams = await this.getTeamsWithOrder();
+      if (teams.length === 0) {
+        throw new Error('No teams in league');
       }
 
-      // 2. Process No Cost Keepers (Last Available Rounds)
-      const noCostKeepers = allKeepers.filter(k => k.keeperRound === null || k.keeperRound === 0);
+      // 2. PROCESS KEEPERS
+      const allKeepers = await this.prisma.playerRoster.findMany({
+        where: {
+          leagueId: this.leagueId,
+          isKeeper: true,
+        },
+      });
 
-      for (const keeper of noCostKeepers) {
-        // Find the LAST available pick for this team
-        const pick = await this.prisma.draftPick.findFirst({
-          where: {
-            leagueId: this.leagueId,
-            currentOwnerId: keeper.teamId,
-            isComplete: false,
-          },
-          orderBy: {
-            overallPickNumber: 'desc',
-          },
-        });
+      console.log(`[startDraft] Found ${allKeepers.length} keepers to process.`);
 
-        if (pick) {
-          await this.prisma.draftPick.update({
-            where: { id: pick.id },
-            data: {
-              isComplete: true,
-              selectedPlayerId: keeper.playerId,
-              selectedAt: new Date(),
-              isAutoPick: false,
-            },
-          });
-
-          // Update the roster to reflect the assigned round
-          await this.prisma.playerRoster.update({
+      // Use a transaction for all keeper updates to ensure atomicity
+      await this.prisma.$transaction(async (tx) => {
+        // A. Process Cost Keepers First (Specific Rounds)
+        const costKeepers = allKeepers.filter(k => k.keeperRound !== null && k.keeperRound > 0);
+        for (const keeper of costKeepers) {
+          const pick = await tx.draftPick.findFirst({
             where: {
-              teamId_playerId: {
-                teamId: keeper.teamId,
-                playerId: keeper.playerId
-              }
+              leagueId: this.leagueId,
+              round: keeper.keeperRound!,
+              currentOwnerId: keeper.teamId,
+              isComplete: false,
             },
-            data: { keeperRound: pick.round }
           });
 
-          console.log(`[startDraft] No-Cost Keeper processed: Team ${keeper.teamId} kept Player ${keeper.playerId} at end (Round ${pick.round}, Pick ${pick.overallPickNumber})`);
-        } else {
-          console.warn(`[startDraft] WARNING: No picks available for No-Cost keeper. Ignored.`);
+          if (pick) {
+            await tx.draftPick.update({
+              where: { id: pick.id },
+              data: {
+                isComplete: true,
+                selectedPlayerId: keeper.playerId,
+                selectedAt: new Date(),
+                isAutoPick: false,
+              },
+            });
+            console.log(`[startDraft] Cost keeper: Team ${keeper.teamId} -> Player ${keeper.playerId} (Round ${keeper.keeperRound})`);
+          } else {
+            console.warn(`[startDraft] No pick found for cost keeper (Team: ${keeper.teamId}, Round: ${keeper.keeperRound})`);
+          }
         }
+
+        // B. Process No Cost Keepers (Last Available Rounds)
+        const noCostKeepers = allKeepers.filter(k => k.keeperRound === null || k.keeperRound === 0);
+        for (const keeper of noCostKeepers) {
+          const pick = await tx.draftPick.findFirst({
+            where: {
+              leagueId: this.leagueId,
+              currentOwnerId: keeper.teamId,
+              isComplete: false,
+            },
+            orderBy: { overallPickNumber: 'desc' },
+          });
+
+          if (pick) {
+            await tx.draftPick.update({
+              where: { id: pick.id },
+              data: {
+                isComplete: true,
+                selectedPlayerId: keeper.playerId,
+                selectedAt: new Date(),
+                isAutoPick: false,
+              },
+            });
+
+            // Sync the assigned round back to roster
+            await tx.playerRoster.update({
+              where: {
+                teamId_playerId: {
+                  teamId: keeper.teamId,
+                  playerId: keeper.playerId
+                }
+              },
+              data: { keeperRound: pick.round }
+            });
+            console.log(`[startDraft] No-cost keeper: Team ${keeper.teamId} -> Player ${keeper.playerId} (Round ${pick.round})`);
+          }
+        }
+      });
+
+      // 3. Find the first AVAILABLE pick after processing keepers
+      const firstPick = await this.prisma.draftPick.findFirst({
+        where: {
+          leagueId: this.leagueId,
+          isComplete: false,
+        },
+        orderBy: { overallPickNumber: 'asc' },
+      });
+
+      if (!firstPick) {
+        // If all picks are filled by keepers, the draft is immediately complete
+        console.log(`[startDraft] All picks filled by keepers. Draft completing immediately.`);
+        await this.prisma.draftState.upsert({
+          where: { leagueId: this.leagueId },
+          create: { leagueId: this.leagueId, status: 'COMPLETED' },
+          update: { status: 'COMPLETED' },
+        });
+        this.clearStateCache();
+        this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_COMPLETE, {
+          leagueId: this.leagueId,
+          completedAt: new Date().toISOString(),
+        });
+        return;
       }
-    }
 
-    // Verify draft picks exist and find the first AVAILABLE pick (skipping keepers)
-    const firstPick = await this.prisma.draftPick.findFirst({
-      where: {
+      const firstTeamOnClock = teams.find(t => t.id === firstPick.currentOwnerId) || teams[0];
+      if (!firstTeamOnClock) {
+        throw new Error('Could not determine first team on clock');
+      }
+      const now = new Date();
+
+      // 4. Update draft state to IN_PROGRESS
+      await this.prisma.draftState.upsert({
+        where: { leagueId: this.leagueId },
+        create: {
+          leagueId: this.leagueId,
+          status: 'IN_PROGRESS',
+          currentRound: firstPick.round || 1,
+          currentPick: firstPick.overallPickNumber || 1,
+          currentTeamId: firstTeamOnClock.id,
+          isPaused: false,
+          timerStartedAt: now,
+          timerSecondsRemaining: settings.timerDurationSeconds,
+          startedAt: now,
+          lastActivityAt: now,
+        },
+        update: {
+          status: 'IN_PROGRESS',
+          currentRound: firstPick.round || 1,
+          currentPick: firstPick.overallPickNumber || 1,
+          currentTeamId: firstTeamOnClock.id,
+          isPaused: false,
+          timerStartedAt: now,
+          timerSecondsRemaining: settings.timerDurationSeconds,
+          startedAt: now,
+          lastActivityAt: now,
+        },
+      });
+
+      this.clearStateCache();
+
+      // Log activity
+      await this.prisma.draftActivityLog.create({
+        data: {
+          leagueId: this.leagueId,
+          activityType: 'DRAFT_STARTED',
+          description: 'Draft started',
+        },
+      });
+
+      // 5. Broadcast draft start
+      const payload: DraftStartPayload = {
         leagueId: this.leagueId,
-        isComplete: false, // SKIP COMPLETED KEEPER PICKS
-      },
-      orderBy: {
-        overallPickNumber: 'asc',
-      },
-    });
-
-    if (!firstPick) {
-      throw new Error('Draft picks not generated. Please generate picks first.');
-    }
-
-    // The team on the clock is whoever currently owns pick #1
-    const firstTeamOnClock = teams.find(t => t.id === firstPick.currentOwnerId) || teams[0];
-    if (!firstTeamOnClock) {
-      throw new Error('Could not determine first team to pick');
-    }
-
-    console.log(`[startDraft] Pick #1 owner: ${firstPick.currentOwnerId}, team on clock: ${firstTeamOnClock.name} (${firstTeamOnClock.id})`);
-
-    const now = new Date();
-
-    // Create or update draft state
-    await this.prisma.draftState.upsert({
-      where: { leagueId: this.leagueId },
-      create: {
-        leagueId: this.leagueId,
-        status: 'IN_PROGRESS',
-        currentRound: 1,
-        currentPick: 1,
+        startedAt: now.toISOString(),
+        currentPick: firstPick.overallPickNumber || 1,
         currentTeamId: firstTeamOnClock.id,
-        isPaused: false,
-        timerStartedAt: now,
-        timerSecondsRemaining: settings.timerDurationSeconds,
-        startedAt: now,
-        lastActivityAt: now,
-      },
-      update: {
-        status: 'IN_PROGRESS',
-        currentRound: 1,
-        currentPick: 1,
-        currentTeamId: firstTeamOnClock.id,
-        isPaused: false,
-        timerStartedAt: now,
-        timerSecondsRemaining: settings.timerDurationSeconds,
-        startedAt: now,
-        lastActivityAt: now,
-      },
-    });
+        currentTeam: firstTeamOnClock,
+        timerDuration: settings.timerDurationSeconds,
+        draftOrder: teams,
+      };
 
-    // Clear cache
-    this.stateCache = null;
+      this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_START, payload);
+      this.startTimer(settings.timerDurationSeconds || 90);
 
-    // Log activity
-    await this.prisma.draftActivityLog.create({
-      data: {
-        leagueId: this.leagueId,
-        activityType: 'DRAFT_STARTED',
-        description: 'Draft started',
-      },
-    });
+      // Also broadcast full state to ensure everyone has up-to-date picks/keepers/players
+      const fullState = await this.getFullState();
+      this.io.to(this.getRoomName()).emit(SocketEvents.STATE_SYNC, fullState);
 
-    // Broadcast draft start
-    const payload: DraftStartPayload = {
-      leagueId: this.leagueId,
-      startedAt: now.toISOString(),
-      currentPick: 1,
-      currentTeamId: firstTeamOnClock.id,
-      currentTeam: firstTeamOnClock,
-      timerDuration: settings.timerDurationSeconds,
-      draftOrder: teams,
-    };
-
-    this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_START, payload);
-
-    // Start the timer
-    this.startTimer(settings.timerDurationSeconds);
+      console.log(`[DraftStateManager] Draft successfully started for league ${this.leagueId}.`);
+    } catch (error) {
+      console.error(`[DraftStateManager] FAILED to start draft:`, error);
+      throw error;
+    }
   }
+
 
   async pauseDraft(reason: string, pausedBy: string): Promise<void> {
     const state = await this.getCurrentState();
@@ -682,7 +699,7 @@ export class DraftStateManager {
       },
     });
 
-    this.stateCache = null;
+    this.clearStateCache();
 
     // Log activity
     await this.prisma.draftActivityLog.create({
@@ -727,7 +744,7 @@ export class DraftStateManager {
       },
     });
 
-    this.stateCache = null;
+    this.clearStateCache();
 
     // Log activity
     await this.prisma.draftActivityLog.create({
@@ -1143,20 +1160,16 @@ export class DraftStateManager {
     this.stopTimer();
 
     await this.prisma.$transaction(async (tx) => {
+      // 0. Define current year for query
       const currentYear = new Date().getFullYear();
 
-      // 1. Delete future pick records (they become virtual/defaulted)
-      await tx.draftPick.deleteMany({
-        where: {
-          leagueId: this.leagueId,
-          season: { gt: currentYear },
-        },
-      });
+      // 1. (Removed) Do NOT delete future pick records as they may represent traded picks.
+      // Only current season draft state should be reset.
 
-      // 2. Reset current season picks to original owners and clear selections
+      // 2. Clear selections but preserve current ownership (handles pre-draft trades)
       // Use raw query since Prisma updateMany can't set column = another column
       await tx.$executeRawUnsafe(
-        `UPDATE "DraftPick" SET "currentOwnerId" = "originalOwnerId", "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false WHERE "leagueId" = $1 AND "season" = $2`,
+        `UPDATE "DraftPick" SET "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false WHERE "leagueId" = $1 AND "season" = $2`,
         this.leagueId,
         currentYear
       );

@@ -3,13 +3,11 @@
 
 'use client';
 
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Separator } from '@/components/ui/separator';
 import { Search, Star, Info } from 'lucide-react';
 import type { PlayerSummary } from '@/types/socket';
 import {
@@ -76,6 +74,9 @@ export function PlayerPool({
     const filteredPlayers = useMemo(() => {
         let result = [...players];
 
+        // Exclude players who are already kept (should be handled by server, but extra safety)
+        result = result.filter(p => !p.keptByTeam);
+
         if (search.trim()) {
             const s = search.toLowerCase();
             result = result.filter(p => p.fullName.toLowerCase().includes(s));
@@ -99,7 +100,7 @@ export function PlayerPool({
             <div className="p-4 space-y-4 bg-slate-50/50">
                 <div className="flex items-center justify-between">
                     <h2 className="text-sm font-bold tracking-wider text-slate-500 uppercase">Player Pool</h2>
-                    <span className="text-[10px] font-bold text-slate-600 bg-slate-200 px-2 py-0.5 rounded-full">{players.length} available</span>
+                    <span className="text-[10px] font-bold text-slate-600 bg-slate-200 px-2 py-0.5 rounded-full">{filteredPlayers.length} available</span>
                 </div>
 
                 {/* Search Bar */}
@@ -165,31 +166,27 @@ export function PlayerPool({
                         </div>
                     ) : (
                         filteredPlayers.map((player) => {
-                            const isKept = !!player.keptByTeam;
                             return (
                                 <div
                                     key={player.id}
-                                    onClick={() => !isKept && isMyTurn && onDraftPlayer(player.id)}
+                                    onClick={() => isMyTurn && onDraftPlayer(player.id)}
                                     className={cn(
                                         "grid grid-cols-[36px,44px,1fr,44px,44px] gap-2 px-4 py-2.5 items-center transition-all group",
                                         "relative border-b border-slate-100",
-                                        isKept
-                                            ? "opacity-50 cursor-not-allowed bg-slate-50"
-                                            : cn("cursor-pointer", isMyTurn ? "hover:bg-blue-50" : "hover:bg-slate-50")
+                                        "cursor-pointer",
+                                        isMyTurn ? "hover:bg-blue-50" : "hover:bg-slate-50"
                                     )}
                                 >
                                     {/* Star Overlay on hover */}
-                                    {!isKept && (
-                                        <button
-                                            onClick={(e) => toggleFavorite(player.id, e)}
-                                            className={cn(
-                                                "absolute left-1 top-1/2 -translate-y-1/2 p-1 transition-opacity",
-                                                favorites.has(player.id) ? "opacity-100 text-yellow-500" : "opacity-0 group-hover:opacity-100 text-slate-300"
-                                            )}
-                                        >
-                                            <Star className={cn("w-3 h-3", favorites.has(player.id) && "fill-current")} />
-                                        </button>
-                                    )}
+                                    <button
+                                        onClick={(e) => toggleFavorite(player.id, e)}
+                                        className={cn(
+                                            "absolute left-1 top-1/2 -translate-y-1/2 p-1 transition-opacity",
+                                            favorites.has(player.id) ? "opacity-100 text-yellow-500" : "opacity-0 group-hover:opacity-100 text-slate-300"
+                                        )}
+                                    >
+                                        <Star className={cn("w-3 h-3", favorites.has(player.id) && "fill-current")} />
+                                    </button>
 
                                     {/* Rank */}
                                     <div className="text-center text-xs font-mono text-slate-500 ml-4">
@@ -211,16 +208,11 @@ export function PlayerPool({
                                         <div className="flex items-center gap-1.5">
                                             <span className={cn(
                                                 "text-xs font-bold truncate transition-colors",
-                                                isKept ? "text-slate-400 line-through" : "text-slate-900 group-hover:text-blue-600"
+                                                "text-slate-900 group-hover:text-blue-600"
                                             )}>
                                                 {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
                                             </span>
-                                            {isKept && (
-                                                <span className="text-[9px] font-bold text-orange-600 uppercase shrink-0 bg-orange-500/10 px-1.5 py-0.5 rounded-sm border border-orange-500/20">
-                                                    KEPT · {player.keptByTeam}
-                                                </span>
-                                            )}
-                                            {player.injuryStatus && !isKept && (
+                                            {player.injuryStatus && (
                                                 <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
                                                     {player.injuryStatus}
                                                 </span>
