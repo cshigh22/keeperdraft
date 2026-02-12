@@ -356,26 +356,28 @@ export class DraftStateManager {
       .map((p) => p.selectedPlayerId)
       .filter((id): id is string => id !== null);
 
-    // Get keeper player IDs
-    const keeperPlayerIds = await this.prisma.playerRoster.findMany({
+    // Get keeper player IDs with their team names
+    const keeperRosters = await this.prisma.playerRoster.findMany({
       where: {
         leagueId: this.leagueId,
         isKeeper: true,
       },
-      select: { playerId: true },
+      select: { playerId: true, team: { select: { name: true } } },
     });
 
-    const keeperIds = keeperPlayerIds.map((p) => p.playerId);
-    const unavailableIds = [...new Set([...draftedIds, ...keeperIds])];
+    const keeperMap = new Map<string, string>();
+    for (const k of keeperRosters) {
+      keeperMap.set(k.playerId, k.team.name);
+    }
 
-    // Get available players
+    // Exclude only drafted players (keepers will be included but marked)
     const players = await this.prisma.player.findMany({
       where: {
-        id: { notIn: unavailableIds },
+        id: { notIn: draftedIds },
         status: 'ACTIVE',
       },
       orderBy: { rank: 'asc' },
-      take: 500, // Limit for performance
+      take: 500,
     });
 
     return players.map((player) => ({
@@ -387,6 +389,7 @@ export class DraftStateManager {
       rank: player.rank,
       adp: player.adp,
       bye: player.byeWeek,
+      keptByTeam: keeperMap.get(player.id) || null,
     }));
   }
 
@@ -485,10 +488,101 @@ export class DraftStateManager {
 
     // Verify draft picks exist and find who owns pick #1
     // (may differ from teams[0] if picks were traded pre-draft)
+    // PROCESS KEEPERS: Mark keeper picks as complete
+    // PROCESS KEEPERS: Mark keeper picks as complete
+    const allKeepers = await this.prisma.playerRoster.findMany({
+      where: {
+        leagueId: this.leagueId,
+        isKeeper: true,
+      },
+    });
+
+    if (allKeepers.length > 0) {
+      console.log(`[startDraft] Processing ${allKeepers.length} keepers...`);
+
+      // 1. Process Cost Keepers First (Specific Rounds)
+      const costKeepers = allKeepers.filter(k => k.keeperRound !== null && k.keeperRound > 0);
+
+      for (const keeper of costKeepers) {
+        // Find the pick for this team in the specified round
+        const pick = await this.prisma.draftPick.findFirst({
+          where: {
+            leagueId: this.leagueId,
+            round: keeper.keeperRound!,
+            currentOwnerId: keeper.teamId,
+            isComplete: false,
+          },
+        });
+
+        if (pick) {
+          await this.prisma.draftPick.update({
+            where: { id: pick.id },
+            data: {
+              isComplete: true,
+              selectedPlayerId: keeper.playerId,
+              selectedAt: new Date(),
+              isAutoPick: false,
+            },
+          });
+          console.log(`[startDraft] Keeper processed: Team ${keeper.teamId} kept Player ${keeper.playerId} in Round ${keeper.keeperRound} (Pick ${pick.overallPickNumber})`);
+        } else {
+          console.warn(`[startDraft] WARNING: Could not find available pick for keeper (Team ${keeper.teamId}, Round ${keeper.keeperRound}). Keeper selection ignored.`);
+        }
+      }
+
+      // 2. Process No Cost Keepers (Last Available Rounds)
+      const noCostKeepers = allKeepers.filter(k => k.keeperRound === null || k.keeperRound === 0);
+
+      for (const keeper of noCostKeepers) {
+        // Find the LAST available pick for this team
+        const pick = await this.prisma.draftPick.findFirst({
+          where: {
+            leagueId: this.leagueId,
+            currentOwnerId: keeper.teamId,
+            isComplete: false,
+          },
+          orderBy: {
+            overallPickNumber: 'desc',
+          },
+        });
+
+        if (pick) {
+          await this.prisma.draftPick.update({
+            where: { id: pick.id },
+            data: {
+              isComplete: true,
+              selectedPlayerId: keeper.playerId,
+              selectedAt: new Date(),
+              isAutoPick: false,
+            },
+          });
+
+          // Update the roster to reflect the assigned round
+          await this.prisma.playerRoster.update({
+            where: {
+              teamId_playerId: {
+                teamId: keeper.teamId,
+                playerId: keeper.playerId
+              }
+            },
+            data: { keeperRound: pick.round }
+          });
+
+          console.log(`[startDraft] No-Cost Keeper processed: Team ${keeper.teamId} kept Player ${keeper.playerId} at end (Round ${pick.round}, Pick ${pick.overallPickNumber})`);
+        } else {
+          console.warn(`[startDraft] WARNING: No picks available for No-Cost keeper. Ignored.`);
+        }
+      }
+    }
+
+    // Verify draft picks exist and find the first AVAILABLE pick (skipping keepers)
     const firstPick = await this.prisma.draftPick.findFirst({
       where: {
         leagueId: this.leagueId,
-        overallPickNumber: 1,
+        isComplete: false, // SKIP COMPLETED KEEPER PICKS
+      },
+      orderBy: {
+        overallPickNumber: 'asc',
       },
     });
 

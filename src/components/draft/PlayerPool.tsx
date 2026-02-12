@@ -164,68 +164,83 @@ export function PlayerPool({
                             <p className="text-sm font-medium">No players found</p>
                         </div>
                     ) : (
-                        filteredPlayers.map((player) => (
-                            <div
-                                key={player.id}
-                                onClick={() => isMyTurn && onDraftPlayer(player.id)}
-                                className={cn(
-                                    "grid grid-cols-[36px,44px,1fr,44px,44px] gap-2 px-4 py-2.5 items-center transition-all cursor-pointer group",
-                                    isMyTurn ? "hover:bg-blue-50" : "hover:bg-slate-50",
-                                    "relative border-b border-slate-100"
-                                )}
-                            >
-                                {/* Star Overlay on hover */}
-                                <button
-                                    onClick={(e) => toggleFavorite(player.id, e)}
+                        filteredPlayers.map((player) => {
+                            const isKept = !!player.keptByTeam;
+                            return (
+                                <div
+                                    key={player.id}
+                                    onClick={() => !isKept && isMyTurn && onDraftPlayer(player.id)}
                                     className={cn(
-                                        "absolute left-1 top-1/2 -translate-y-1/2 p-1 transition-opacity",
-                                        favorites.has(player.id) ? "opacity-100 text-yellow-500" : "opacity-0 group-hover:opacity-100 text-slate-300"
+                                        "grid grid-cols-[36px,44px,1fr,44px,44px] gap-2 px-4 py-2.5 items-center transition-all group",
+                                        "relative border-b border-slate-100",
+                                        isKept
+                                            ? "opacity-50 cursor-not-allowed bg-slate-50"
+                                            : cn("cursor-pointer", isMyTurn ? "hover:bg-blue-50" : "hover:bg-slate-50")
                                     )}
                                 >
-                                    <Star className={cn("w-3 h-3", favorites.has(player.id) && "fill-current")} />
-                                </button>
+                                    {/* Star Overlay on hover */}
+                                    {!isKept && (
+                                        <button
+                                            onClick={(e) => toggleFavorite(player.id, e)}
+                                            className={cn(
+                                                "absolute left-1 top-1/2 -translate-y-1/2 p-1 transition-opacity",
+                                                favorites.has(player.id) ? "opacity-100 text-yellow-500" : "opacity-0 group-hover:opacity-100 text-slate-300"
+                                            )}
+                                        >
+                                            <Star className={cn("w-3 h-3", favorites.has(player.id) && "fill-current")} />
+                                        </button>
+                                    )}
 
-                                {/* Rank */}
-                                <div className="text-center text-xs font-mono text-slate-500 ml-4">
-                                    {player.rank || '-'}
-                                </div>
-
-                                {/* Position */}
-                                <div className="flex justify-center">
-                                    <span className={cn(
-                                        "w-9 py-0.5 rounded-sm text-[9px] font-black border text-center",
-                                        positionBadgeColors[player.position] || "bg-slate-700/50 text-slate-400 border-slate-600"
-                                    )}>
-                                        {player.position}
-                                    </span>
-                                </div>
-
-                                {/* Player Name & Team */}
-                                <div className="pl-2 min-w-0">
-                                    <div className="flex items-center gap-1.5">
-                                        <span className="text-xs font-bold truncate text-slate-900 group-hover:text-blue-600 transition-colors">
-                                            {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
-                                        </span>
-                                        {player.injuryStatus && (
-                                            <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
-                                                {player.injuryStatus}
-                                            </span>
-                                        )}
+                                    {/* Rank */}
+                                    <div className="text-center text-xs font-mono text-slate-500 ml-4">
+                                        {player.rank || '-'}
                                     </div>
-                                    <div className="text-[10px] text-slate-500 font-medium uppercase">{player.nflTeam || 'FA'}</div>
-                                </div>
 
-                                {/* ADP */}
-                                <div className="text-center text-[11px] font-medium text-slate-400">
-                                    {player.adp ? Math.round(player.adp) : '-'}
-                                </div>
+                                    {/* Position */}
+                                    <div className="flex justify-center">
+                                        <span className={cn(
+                                            "w-9 py-0.5 rounded-sm text-[9px] font-black border text-center",
+                                            positionBadgeColors[player.position] || "bg-slate-700/50 text-slate-400 border-slate-600"
+                                        )}>
+                                            {player.position}
+                                        </span>
+                                    </div>
 
-                                {/* BYE */}
-                                <div className="text-center text-[11px] font-medium text-slate-400">
-                                    {player.bye || '-'}
+                                    {/* Player Name & Team */}
+                                    <div className="pl-2 min-w-0">
+                                        <div className="flex items-center gap-1.5">
+                                            <span className={cn(
+                                                "text-xs font-bold truncate transition-colors",
+                                                isKept ? "text-slate-400 line-through" : "text-slate-900 group-hover:text-blue-600"
+                                            )}>
+                                                {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
+                                            </span>
+                                            {isKept && (
+                                                <span className="text-[9px] font-bold text-orange-600 uppercase shrink-0 bg-orange-500/10 px-1.5 py-0.5 rounded-sm border border-orange-500/20">
+                                                    KEPT · {player.keptByTeam}
+                                                </span>
+                                            )}
+                                            {player.injuryStatus && !isKept && (
+                                                <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
+                                                    {player.injuryStatus}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div className="text-[10px] text-slate-500 font-medium uppercase">{player.nflTeam || 'FA'}</div>
+                                    </div>
+
+                                    {/* ADP */}
+                                    <div className="text-center text-[11px] font-medium text-slate-400">
+                                        {player.adp ? Math.round(player.adp) : '-'}
+                                    </div>
+
+                                    {/* BYE */}
+                                    <div className="text-center text-[11px] font-medium text-slate-400">
+                                        {player.bye || '-'}
+                                    </div>
                                 </div>
-                            </div>
-                        ))
+                            );
+                        })
                     )}
                 </div>
             </ScrollArea>

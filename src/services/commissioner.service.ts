@@ -24,7 +24,7 @@ interface SetDraftOrderResult {
   picksGenerated: number;
 }
 
-interface DraftSettingsInput {
+export interface DraftSettingsInput {
   leagueId: string;
   draftType?: DraftType;
   totalRounds?: number;
@@ -32,6 +32,7 @@ interface DraftSettingsInput {
   reserveTimeSeconds?: number;
   pauseOnTrade?: boolean;
   maxKeepers?: number;
+  keeperDeadline?: Date | null;
   scheduledStartTime?: Date;
 }
 
@@ -316,6 +317,15 @@ export const CommissionerService = {
         description: 'Draft settings updated',
         metadata: settings,
       },
+    });
+  },
+
+  /**
+   * Get draft settings
+   */
+  async getDraftSettings(leagueId: string) {
+    return await prisma.draftSettings.findUnique({
+      where: { leagueId },
     });
   },
 

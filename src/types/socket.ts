@@ -68,6 +68,7 @@ export interface PlayerSummary {
   adp?: number | null;
   bye?: number | null;
   injuryStatus?: string | null;
+  keptByTeam?: string | null; // Team name if this player is kept
 }
 
 export interface RosterPlayer extends PlayerSummary {

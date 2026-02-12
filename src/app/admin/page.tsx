@@ -45,6 +45,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
+import { updateDraftSettingsAction, getDraftSettingsAction } from '@/app/actions/commissioner';
 
 // ============================================================================
 // MOCK SESSION (Replace with real auth in production)
@@ -85,6 +86,39 @@ export default function CommissionerDashboard() {
     action: string;
     onConfirm: () => void;
   }>({ open: false, action: '', onConfirm: () => { } });
+
+  const [maxKeepers, setMaxKeepers] = useState(3);
+  const [keeperDeadline, setKeeperDeadline] = useState('');
+
+  // Fetch settings
+  React.useEffect(() => {
+    async function fetchSettings() {
+      const result = await getDraftSettingsAction(MOCK_LEAGUE_ID);
+      if (result.success && result.data) {
+        setMaxKeepers(result.data.maxKeepers || 3);
+        setTimerDuration(result.data.timerDurationSeconds?.toString() || '90');
+        if (result.data.keeperDeadline) {
+          // Format for datetime-local: YYYY-MM-DDThh:mm
+          const d = new Date(result.data.keeperDeadline);
+          // Handling naive local time conversion for input value
+          const offset = d.getTimezoneOffset() * 60000;
+          const localISOTime = (new Date(d.getTime() - offset)).toISOString().slice(0, 16);
+          setKeeperDeadline(localISOTime);
+        }
+      }
+    }
+    fetchSettings();
+  }, []);
+
+  const handleUpdateSettings = async () => {
+    await updateDraftSettingsAction({
+      leagueId: MOCK_LEAGUE_ID,
+      maxKeepers,
+      keeperDeadline: keeperDeadline ? new Date(keeperDeadline) : null,
+      timerDurationSeconds: parseInt(timerDuration),
+    });
+    // Optional: show feedback
+  };
 
   const { state, actions } = useDraftSocket({
     leagueId: MOCK_LEAGUE_ID,
@@ -291,7 +325,11 @@ export default function CommissionerDashboard() {
 
               {/* Settings */}
               <div className="space-y-4">
-                <h3 className="font-semibold">Draft Settings</h3>
+                <div className="flex justify-between items-center">
+                  <h3 className="font-semibold">Draft Settings</h3>
+                  <Button size="sm" onClick={handleUpdateSettings}>Save Settings</Button>
+                </div>
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="timer">Timer Duration (seconds)</Label>
@@ -310,6 +348,27 @@ export default function CommissionerDashboard() {
                       placeholder="Optional reason for pause"
                       value={pauseReason}
                       onChange={(e) => setPauseReason(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="maxKeepers">Max Keepers per Team</Label>
+                    <Input
+                      id="maxKeepers"
+                      type="number"
+                      min="0"
+                      max="20"
+                      value={maxKeepers}
+                      onChange={(e) => setMaxKeepers(parseInt(e.target.value) || 0)}
+                      disabled={state.status === 'IN_PROGRESS'}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="keeperDeadline">Keeper Deadline</Label>
+                    <Input
+                      id="keeperDeadline"
+                      type="datetime-local"
+                      value={keeperDeadline}
+                      onChange={(e) => setKeeperDeadline(e.target.value)}
                     />
                   </div>
                 </div>

@@ -32,6 +32,7 @@ import {
   ArrowLeftRight,
   RefreshCw,
   AlertTriangle,
+  Shield,
 } from 'lucide-react';
 import type { TradeOfferedPayload } from '@/types/socket';
 
@@ -257,6 +258,17 @@ export default function DraftRoom() {
                 </p>
               </div>
 
+              {/* Keepers Link */}
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => window.location.href = `/leagues/${MOCK_LEAGUE_ID}/keepers?teamId=${session.teamId}`}
+                title="Select Keepers"
+              >
+                <Shield className="w-5 h-5" />
+              </Button>
+              {/* Logout */}
+
               {/* Logout */}
               <Button variant="ghost" size="icon" onClick={handleLogout}>
                 <LogOut className="w-5 h-5" />
@@ -279,6 +291,24 @@ export default function DraftRoom() {
           </div>
         )}
       </header>
+
+      {/* Pre-Draft Keepers Banner */}
+      {state.status === 'NOT_STARTED' && (
+        <div className="bg-primary/10 border-b border-primary/20 py-4 px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <Shield className="w-6 h-6 text-primary" />
+            <div>
+              <h3 className="font-semibold text-primary">Draft has not started</h3>
+              <p className="text-sm text-muted-foreground">Please review and declare your keepers before the draft begins.</p>
+            </div>
+          </div>
+          <Button
+            onClick={() => window.location.href = `/leagues/${MOCK_LEAGUE_ID}/keepers?teamId=${session.teamId}`}
+          >
+            Declare Keepers
+          </Button>
+        </div>
+      )}
 
       {/* Main Content */}
       <main className="flex-1 container mx-auto px-4 py-4 min-h-0 flex flex-col">
