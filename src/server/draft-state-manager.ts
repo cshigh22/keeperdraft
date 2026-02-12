@@ -1166,10 +1166,10 @@ export class DraftStateManager {
       // 1. (Removed) Do NOT delete future pick records as they may represent traded picks.
       // Only current season draft state should be reset.
 
-      // 2. Clear selections but preserve current ownership (handles pre-draft trades)
+      // 2. Clear selections AND reset traded picks back to original owners
       // Use raw query since Prisma updateMany can't set column = another column
       await tx.$executeRawUnsafe(
-        `UPDATE "DraftPick" SET "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false WHERE "leagueId" = $1 AND "season" = $2`,
+        `UPDATE "DraftPick" SET "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false, "currentOwnerId" = "originalOwnerId" WHERE "leagueId" = $1 AND "season" = $2`,
         this.leagueId,
         currentYear
       );

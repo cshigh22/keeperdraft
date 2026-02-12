@@ -1,4 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
+import { PrismaClient } from '@prisma/client';
+
 const prisma = new PrismaClient();
 
 async function main() {
@@ -13,7 +14,11 @@ async function main() {
         select: { selectedPlayerId: true }
     });
 
-    const completedIds = new Set(completedPicks.map(p => p.selectedPlayerId));
+    const completedIds = new Set(
+        completedPicks
+            .map(p => p.selectedPlayerId)
+            .filter((id): id is string => id !== null)
+    );
 
     console.log('Total Keepers:', keepers.length);
     console.log('Completed Picks:', completedPicks.length);

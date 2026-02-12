@@ -760,15 +760,12 @@ export const CommissionerService = {
         },
       });
 
-      // Reset all picks
-      await tx.draftPick.updateMany({
-        where: { leagueId },
-        data: {
-          selectedPlayerId: null,
-          selectedAt: null,
-          isComplete: false,
-        },
-      });
+      // Reset all picks AND return traded picks to original owners
+      // Use raw query since Prisma updateMany can't set column = another column
+      await tx.$executeRawUnsafe(
+        `UPDATE "DraftPick" SET "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false, "currentOwnerId" = "originalOwnerId" WHERE "leagueId" = $1`,
+        leagueId
+      );
 
       // Reset draft state
       await tx.draftState.update({
