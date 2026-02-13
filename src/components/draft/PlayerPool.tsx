@@ -169,12 +169,10 @@ export function PlayerPool({
                             return (
                                 <div
                                     key={player.id}
-                                    onClick={() => isMyTurn && onDraftPlayer(player.id)}
                                     className={cn(
                                         "grid grid-cols-[36px,44px,1fr,44px,44px] gap-2 px-4 py-2.5 items-center transition-all group",
                                         "relative border-b border-slate-100",
-                                        "cursor-pointer",
-                                        isMyTurn ? "hover:bg-blue-50" : "hover:bg-slate-50"
+                                        "hover:bg-slate-50"
                                     )}
                                 >
                                     {/* Star Overlay on hover */}
@@ -204,21 +202,40 @@ export function PlayerPool({
                                     </div>
 
                                     {/* Player Name & Team */}
-                                    <div className="pl-2 min-w-0">
-                                        <div className="flex items-center gap-1.5">
-                                            <span className={cn(
-                                                "text-xs font-bold truncate transition-colors",
-                                                "text-slate-900 group-hover:text-blue-600"
-                                            )}>
-                                                {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
-                                            </span>
-                                            {player.injuryStatus && (
-                                                <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
-                                                    {player.injuryStatus}
+                                    <div className="pl-2 min-w-0 flex items-center justify-between">
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-1.5">
+                                                <span className={cn(
+                                                    "text-xs font-bold truncate transition-colors",
+                                                    "text-slate-900 group-hover:text-blue-600"
+                                                )}>
+                                                    {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
                                                 </span>
-                                            )}
+                                                {player.injuryStatus && (
+                                                    <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
+                                                        {player.injuryStatus}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-[10px] text-slate-500 font-medium uppercase">{player.nflTeam || 'FA'}</div>
                                         </div>
-                                        <div className="text-[10px] text-slate-500 font-medium uppercase">{player.nflTeam || 'FA'}</div>
+
+                                        {isMyTurn && (
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onDraftPlayer(player.id);
+                                                }}
+                                                className={cn(
+                                                    "opacity-0 group-hover:opacity-100 transition-all duration-200",
+                                                    "bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white",
+                                                    "text-[9px] font-black px-2.5 py-1 rounded-sm shadow-lg shadow-blue-500/30",
+                                                    "hover:scale-110 active:scale-95 shrink-0 ml-3"
+                                                )}
+                                            >
+                                                DRAFT
+                                            </button>
+                                        )}
                                     </div>
 
                                     {/* ADP */}
@@ -246,7 +263,7 @@ export function PlayerPool({
                         </TooltipTrigger>
                         <TooltipContent>
                             <p className="max-w-[200px] text-xs">
-                                Click a player to draft them when it's your turn. Double-click to see full details.
+                                Hover over a player and click "DRAFT" to pick them.
                             </p>
                         </TooltipContent>
                     </Tooltip>
