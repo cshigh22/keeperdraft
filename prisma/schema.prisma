@@ -10,17 +10,71 @@ datasource db {
 model User {
   id            String         @id @default(cuid())
   email         String         @unique
-  passwordHash  String
-  name          String
-  avatarUrl     String?
+  emailVerified DateTime?
+  passwordHash  String?
+  name          String?
+  image         String?
+  avatarUrl     String?        // Legacy/Custom
   isAdmin       Boolean        @default(false)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
+  accounts      Account[]
+  sessions      Session[]
   leaguesOwned  League[]       @relation("LeagueCommissioner")
   leagueMembers LeagueMember[]
   ownedTeams    Team[]
 
   @@index([email])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model LeagueInvite {
+  id        String   @id @default(cuid())
+  leagueId  String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  league    League   @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+
+  @@index([leagueId])
+  @@index([token])
 }
 
 model League {
@@ -39,6 +93,7 @@ model League {
   members        LeagueMember[]
   teams          Team[]
   trades         Trade[]
+  invites        LeagueInvite[]
 
   @@index([commissionerId])
   @@index([season])
@@ -60,7 +115,7 @@ model LeagueMember {
 model Team {
   id              String         @id @default(cuid())
   name            String
-  ownerId         String
+  ownerId         String?
   leagueId        String
   draftPosition   Int?
   sleeperId       String?
@@ -70,13 +125,12 @@ model Team {
   originalPicks   DraftPick[]    @relation("OriginalPickOwner")
   players         PlayerRoster[]
   league          League         @relation(fields: [leagueId], references: [id], onDelete: Cascade)
-  owner           User           @relation(fields: [ownerId], references: [id])
+  owner           User?          @relation(fields: [ownerId], references: [id])
   tradesInitiated Trade[]        @relation("TradeInitiator")
   tradesReceived  Trade[]        @relation("TradeReceiver")
   tradeAssets     TradeAsset[]
 
   @@unique([leagueId, draftPosition])
-  @@unique([leagueId, ownerId])
   @@index([leagueId])
   @@index([ownerId])
 }

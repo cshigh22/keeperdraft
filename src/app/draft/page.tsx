@@ -14,6 +14,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from '@/components/ui/dialog';
 import { DraftBoard } from '@/components/draft/DraftBoard';
 import { PlayerPool } from '@/components/draft/PlayerPool';
@@ -22,6 +23,9 @@ import { DraftTimer } from '@/components/draft/DraftTimer';
 import { TradeModal, IncomingTradePopup } from '@/components/trade/TradeModal';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
 import { TeamRosters } from '@/components/draft/TeamRosters';
+import { useSession, signOut } from 'next-auth/react';
+import { getMyTeam } from '@/lib/actions';
+import { InviteLinkButton } from '@/components/league/InviteLinkButton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Wifi,
@@ -33,6 +37,9 @@ import {
   RefreshCw,
   AlertTriangle,
   Shield,
+  Loader2,
+  Trophy,
+  Users,
 } from 'lucide-react';
 import type { TradeOfferedPayload } from '@/types/socket';
 
@@ -40,25 +47,7 @@ import type { TradeOfferedPayload } from '@/types/socket';
 // MOCK SESSION (Replace with real auth in production)
 // ============================================================================
 
-function useMockSession() {
-  const [session, setSession] = useState<{
-    userId: string;
-    teamId: string;
-    teamName: string;
-    isCommissioner: boolean;
-  } | null>(null);
-
-  useEffect(() => {
-    // Check localStorage for mock session
-    const stored = localStorage.getItem('draftSession');
-    if (stored) {
-      setSession(JSON.parse(stored));
-    }
-  }, []);
-
-  return { session, setSession };
-}
-
+// DELETED useMockSession
 const MOCK_LEAGUE_ID = 'demo-league';
 
 // ============================================================================
@@ -66,10 +55,26 @@ const MOCK_LEAGUE_ID = 'demo-league';
 // ============================================================================
 
 export default function DraftRoom() {
-  const { session, setSession } = useMockSession();
+  const { data: session, status } = useSession();
+  const [userTeam, setUserTeam] = useState<any | null>(null);
   const [incomingTrade, setIncomingTrade] = useState<TradeOfferedPayload | null>(null);
   const [notificationCount, setNotificationCount] = useState(0);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
+
+  // Fetch user team info for this league
+  useEffect(() => {
+    async function fetchTeam() {
+      if (session?.user?.id) {
+        const team = await getMyTeam(MOCK_LEAGUE_ID);
+        setUserTeam(team);
+      }
+      setIsInitializing(false);
+    }
+    if (status !== 'loading') {
+      fetchTeam();
+    }
+  }, [session, status]);
 
   // Socket connection
   const {
@@ -79,11 +84,11 @@ export default function DraftRoom() {
     actions,
   } = useDraftSocket({
     leagueId: MOCK_LEAGUE_ID,
-    userId: session?.userId || '',
-    teamId: session?.teamId,
+    userId: session?.user?.id || '',
+    teamId: userTeam?.id,
     onTradeOffered: (trade) => {
       // Show popup if trade is for my team
-      if (trade.receiverTeam.id === session?.teamId) {
+      if (trade.receiverTeam.id === userTeam?.id) {
         setIncomingTrade(trade);
       }
       setNotificationCount((n) => n + 1);
@@ -93,17 +98,35 @@ export default function DraftRoom() {
     },
   });
 
-  // Redirect to login if no session
-  if (!session) {
+  // Loading state
+  if (status === 'loading' || isInitializing) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold mb-4">Draft Room</h1>
-          <p className="text-muted-foreground mb-4">
-            Please select a team to join the draft.
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+          <p className="text-muted-foreground font-medium">Loading draft room...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Redirect to login if no session - middleware handles this usually, but good to have
+  if (!session) {
+    window.location.href = '/login';
+    return null;
+  }
+
+  if (!userTeam) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-center max-w-md p-6">
+          <Trophy className="w-12 h-12 text-primary mx-auto mb-4" />
+          <h1 className="text-2xl font-bold mb-2">No Team Found</h1>
+          <p className="text-muted-foreground mb-6">
+            You don't seem to have a team in this league. Please contact the commissioner for an invite.
           </p>
           <Button onClick={() => (window.location.href = '/login')}>
-            Select Team
+            Back to Dashboard
           </Button>
         </div>
       </div>
@@ -115,8 +138,7 @@ export default function DraftRoom() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('draftSession');
-    setSession(null);
+    signOut({ callbackUrl: '/login' });
   };
 
   return (
@@ -199,7 +221,7 @@ export default function DraftRoom() {
               )}
 
               {/* Commissioner Actions */}
-              {session.isCommissioner && (
+              {userTeam.isCommissioner && (
                 <>
                   <Button
                     variant="ghost"
@@ -247,14 +269,29 @@ export default function DraftRoom() {
                       </div>
                     </DialogContent>
                   </Dialog>
+
+                  <Dialog>
+                    <DialogTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="Invite Members"
+                      >
+                        <Users className="w-5 h-5" />
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="sm:max-w-md">
+                      <InviteLinkButton leagueId={MOCK_LEAGUE_ID} />
+                    </DialogContent>
+                  </Dialog>
                 </>
               )}
 
               {/* User/Team info */}
               <div className="hidden sm:block text-right">
-                <p className="text-sm font-medium">{session.teamName}</p>
+                <p className="text-sm font-medium">{userTeam.name}</p>
                 <p className="text-xs text-muted-foreground">
-                  {session.isCommissioner ? 'Commissioner' : 'Team Owner'}
+                  {userTeam.isCommissioner ? 'Commissioner' : 'Team Owner'}
                 </p>
               </div>
 
@@ -262,7 +299,7 @@ export default function DraftRoom() {
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => window.location.href = `/leagues/${MOCK_LEAGUE_ID}/keepers?teamId=${session.teamId}`}
+                onClick={() => window.location.href = `/leagues/${MOCK_LEAGUE_ID}/keepers?teamId=${userTeam.id}`}
                 title="Select Keepers"
               >
                 <Shield className="w-5 h-5" />
@@ -303,7 +340,7 @@ export default function DraftRoom() {
             </div>
           </div>
           <Button
-            onClick={() => window.location.href = `/leagues/${MOCK_LEAGUE_ID}/keepers?teamId=${session.teamId}`}
+            onClick={() => window.location.href = `/leagues/${MOCK_LEAGUE_ID}/keepers?teamId=${userTeam.id}`}
           >
             Declare Keepers
           </Button>
@@ -325,7 +362,7 @@ export default function DraftRoom() {
                 currentTeamId={state.currentTeamId}
                 isPaused={state.isPaused}
                 draftType={state.draftType}
-                myTeamId={session.teamId}
+                myTeamId={userTeam.id}
               />
             </div>
 
@@ -350,7 +387,7 @@ export default function DraftRoom() {
                 teams={state.draftOrder}
                 teamRosters={state.teamRosters}
                 rosterSettings={state.rosterSettings}
-                myTeamId={session.teamId}
+                myTeamId={userTeam.id}
               />
             </div>
           </div>
@@ -406,11 +443,10 @@ export default function DraftRoom() {
               <Button
                 variant="outline"
                 onClick={() => {
-                  localStorage.removeItem('draftSession');
-                  window.location.href = '/login';
+                  signOut({ callbackUrl: '/login' });
                 }}
               >
-                Back to Team Selection
+                Sign Out
               </Button>
             </div>
           </DialogContent>

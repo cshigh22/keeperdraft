@@ -2,6 +2,7 @@
 
 import { prisma } from '@/lib/prisma';
 import { redirect } from 'next/navigation';
+import { auth } from '@/auth';
 
 interface CreateLeagueState {
     message?: string;
@@ -50,23 +51,11 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
     const totalRounds = Math.max(1, totalRosterSize);
 
     try {
-        // Determine the user ID - for now we'll create a dummy user or use a fixed ID since auth is mocked.
-        // In a real app we'd get the session user.
-        // For this implementation, we will check if a user with email 'commissioner@example.com' exists, if not create one.
-        // This is a placeholder for actual auth integration.
-
-        let user = await prisma.user.findUnique({ where: { email: 'commissioner@example.com' } });
-        if (!user) {
-            user = await prisma.user.create({
-                data: {
-                    email: 'commissioner@example.com',
-                    name: 'League Commissioner',
-                    passwordHash: 'placeholder', // In real app this would be hashed
-                    isAdmin: true,
-                },
-            });
+        const session = await auth();
+        if (!session?.user?.id) {
+            return { message: 'You must be logged in to create a league.' };
         }
-        const userId = user.id;
+        const userId = session.user.id;
 
         // Transaction to create everything
         const leagueId = await prisma.$transaction(async (tx) => {
@@ -117,34 +106,13 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
                 },
             });
 
-            // 4. Create other placeholder teams to fill the league
+            // 4. Create placeholder teams for remaining slots
             for (let i = 2; i <= maxTeams; i++) {
-                // Create dummy users for other teams for now, or just placeholder teams?
-                // The requirement says "create the league". Usually other users join later.
-                // But `DraftStateManager` expects `maxTeams` to match `teams.length`?
-                // Actually `state.draftOrder` comes from `teams`. If we only have 1 team, draft order is 1 team.
-                // But `DraftPick` generation needs to know the number of teams.
-                // Let's create placeholder teams so the draft structure is valid immediately.
-
-                /* 
-                   Wait, usually users join via invite.
-                   But to "set up the league... including amount of players", we might need to reserve spots.
-                   For this MVP, let's just create the commissioner's team.
-                   The Draft Picks generation depends on knowing the final number of teams.
-                   Common practice: Generate picks only when league is full or upon "Finalize Teams" action.
-                   However, the prompt says "commissioner should... set up... including amount of players".
-                   And the implementation plan said: "**Generate empty `DraftPick` records** based on `maxTeams`".
-                   
-                   If we generate picks for 10 teams but only 1 exists, who owns the other picks?
-                   We probably need placeholder teams or "Empty Slots".
-                   Let's create placeholder teams owned by the commissioner or a system user for now to make the draft board visualizable.
-                */
-
                 await tx.team.create({
                     data: {
                         name: `Team ${i}`,
                         leagueId: league.id,
-                        ownerId: userId, // Temporarily owned by commissioner
+                        ownerId: null, // No owner until someone joins via invite
                         draftPosition: i,
                     },
                 });
@@ -216,16 +184,103 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
             return league.id;
         });
 
-        // TODO: Set cookie for session persistence since we're using mock auth
-        // In a real server action we can't easily set client-side cookies/localstorage.
-        // We'll rely on the redirect and the client handling the new league ID.
-        // For the "Mock Session", the user usually manually sets it.
-        // We might need to handle this in the UI after redirect, or assume the user is already "logged in" as commissioner.
-
     } catch (error) {
-        console.error('Failed to create league:', error);
+        console.error('Failed to create league:', error instanceof Error ? error.message : error);
+        console.error('Full error:', error);
         return { message: 'Failed to create league. Please try again.' };
     }
 
-    redirect('/draft'); // Redirect to draft room
+    redirect('/leagues'); // Redirect to leagues list
+}
+
+export async function generateInvite(leagueId: string) {
+    const session = await auth();
+    if (!session?.user?.id) throw new Error('Unauthorized');
+
+    const league = await prisma.league.findUnique({
+        where: { id: leagueId },
+        select: { commissionerId: true }
+    });
+
+    if (league?.commissionerId !== session.user.id) {
+        throw new Error('Only the commissioner can generate invites');
+    }
+
+    // Existing token check?
+    const existing = await prisma.leagueInvite.findFirst({
+        where: { leagueId, expiresAt: { gt: new Date() } },
+        orderBy: { createdAt: 'desc' }
+    });
+
+    if (existing) return existing.token;
+
+    const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+
+    const invite = await prisma.leagueInvite.create({
+        data: {
+            leagueId,
+            token,
+            expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7), // 7 days
+        }
+    });
+
+    return invite.token;
+}
+
+export async function joinLeague(token: string) {
+    const session = await auth();
+    if (!session?.user?.id) {
+        redirect(`/login?callbackUrl=/join/${token}`);
+    }
+    const userId = session.user.id;
+
+    const invite = await prisma.leagueInvite.findUnique({
+        where: { token },
+        include: { league: true }
+    });
+
+    if (!invite || invite.expiresAt < new Date()) {
+        throw new Error('Invalid or expired invite');
+    }
+
+    // Check if user is already a member
+    const existingMember = await prisma.leagueMember.findUnique({
+        where: { userId_leagueId: { userId, leagueId: invite.leagueId } }
+    });
+
+    if (existingMember) {
+        redirect(`/leagues/${invite.leagueId}`);
+    }
+
+    // Find first empty team (no owner assigned yet)
+    const emptyTeam = await prisma.team.findFirst({
+        where: {
+            leagueId: invite.leagueId,
+            ownerId: null,
+        },
+        orderBy: { draftPosition: 'asc' }
+    });
+
+    if (!emptyTeam) {
+        throw new Error('League is full');
+    }
+
+    await prisma.$transaction([
+        prisma.leagueMember.create({
+            data: {
+                userId,
+                leagueId: invite.leagueId,
+                role: 'MEMBER'
+            }
+        }),
+        prisma.team.update({
+            where: { id: emptyTeam.id },
+            data: {
+                ownerId: userId,
+                name: `${session.user.name}'s Team`
+            }
+        })
+    ]);
+
+    redirect(`/leagues/${invite.leagueId}`);
 }
