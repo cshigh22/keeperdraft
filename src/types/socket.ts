@@ -47,6 +47,10 @@ export const SocketEvents = {
   STATE_SYNC: 'state_sync',
   PLAYER_TAKEN: 'player_taken',
 
+  // Queue events
+  QUEUE_UPDATED: 'queue_updated',
+  UPDATE_QUEUE: 'update_queue',
+
   // Error events
   ERROR: 'error',
 } as const;
@@ -81,7 +85,7 @@ export interface RosterPlayer extends PlayerSummary {
 export interface TeamSummary {
   id: string;
   name: string;
-  ownerId: string;
+  ownerId: string | null;
   ownerName: string;
   draftPosition: number;
 }
@@ -283,6 +287,7 @@ export interface StateSyncPayload {
   totalRounds?: number;
   draftType?: 'SNAKE' | 'LINEAR';
   rosterSettings?: RosterSettings;
+  teamQueues: Record<string, PlayerSummary[]>; // Players in each team's queue
   timestamp: string;
 }
 
@@ -321,6 +326,7 @@ export interface ClientToServerEvents {
   [SocketEvents.TRADE_ACCEPTED]: (payload: { leagueId: string; tradeId: string }) => void;
   [SocketEvents.TRADE_REJECTED]: (payload: { leagueId: string; tradeId: string }) => void;
   [SocketEvents.TRADE_CANCELLED]: (payload: { leagueId: string; tradeId: string }) => void;
+  [SocketEvents.UPDATE_QUEUE]: (payload: { leagueId: string; teamId: string; playerIds: string[] }) => void;
 }
 
 // ============================================================================
@@ -348,6 +354,7 @@ export interface ServerToClientEvents {
   [SocketEvents.TRADE_COMPLETED]: (payload: TradeAcceptedPayload) => void;
   [SocketEvents.ORDER_UPDATED]: (payload: OrderUpdatedPayload) => void;
   [SocketEvents.SETTINGS_UPDATED]: (payload: { leagueId: string; settings: Record<string, unknown> }) => void;
+  [SocketEvents.QUEUE_UPDATED]: (payload: { leagueId: string; teamId: string; queue: PlayerSummary[] }) => void;
   [SocketEvents.ERROR]: (payload: ErrorPayload) => void;
 }
 

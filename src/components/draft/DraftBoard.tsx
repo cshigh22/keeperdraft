@@ -14,6 +14,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { ArrowRight, ArrowLeft } from 'lucide-react';
 import type { TeamSummary, DraftPickSummary } from '@/types/socket';
 
 // ============================================================================
@@ -30,6 +31,7 @@ interface DraftBoardProps {
   isPaused: boolean;
   draftType: 'SNAKE' | 'LINEAR';
   myTeamId?: string;
+  hideCompleted?: boolean;
 }
 
 interface PickCellProps {
@@ -181,7 +183,6 @@ function PickCell({
 
 export function DraftBoard({
   teams,
-  completedPicks,
   allPicks,
   totalRounds,
   currentPick,
@@ -189,6 +190,7 @@ export function DraftBoard({
   isPaused,
   draftType,
   myTeamId,
+  hideCompleted = true,
 }: DraftBoardProps) {
   // Build pick grid - maps each cell to a pick
   const fullPickMap = useMemo(() => {
@@ -201,33 +203,38 @@ export function DraftBoard({
 
   const pickGrid = useMemo(() => {
     const grid: (DraftPickSummary | null)[][] = [];
-    const teamCount = teams.length;
 
     for (let round = 1; round <= totalRounds; round++) {
       const roundPicks: (DraftPickSummary | null)[] = [];
 
-      for (let position = 1; position <= teamCount; position++) {
+      for (let position = 1; position <= teams.length; position++) {
         // Calculate overall pick number based on draft type
         let overallPick: number;
 
         if (draftType === 'SNAKE') {
           if (round % 2 === 1) {
-            overallPick = (round - 1) * teamCount + position;
+            overallPick = (round - 1) * teams.length + position;
           } else {
-            overallPick = (round - 1) * teamCount + (teamCount - position + 1);
+            overallPick = (round - 1) * teams.length + (teams.length - position + 1);
           }
         } else {
-          overallPick = (round - 1) * teamCount + position;
+          overallPick = (round - 1) * teams.length + position;
         }
 
-        roundPicks.push(fullPickMap.get(overallPick) || null);
+        const pick = fullPickMap.get(overallPick) || null;
+        roundPicks.push(pick);
+      }
+
+      // Filter out completed picks (keepers) if requested
+      if (hideCompleted && roundPicks.every(p => p?.isComplete)) {
+        continue;
       }
 
       grid.push(roundPicks);
     }
 
     return grid;
-  }, [fullPickMap, teams.length, totalRounds, draftType]);
+  }, [fullPickMap, teams.length, totalRounds, draftType, hideCompleted]);
 
   // Calculate which team has each pick
   const getTeamForPick = (overallPickNumber: number): TeamSummary => {
@@ -322,29 +329,34 @@ export function DraftBoard({
             {/* Rounds */}
             {pickGrid.map((roundPicks, roundIndex) => {
               const round = roundIndex + 1;
-              const isReversed = draftType === 'SNAKE' && round % 2 === 0;
+              const isSnake = draftType === 'SNAKE';
+              const isReversed = isSnake && round % 2 === 0;
 
               return (
-                <div key={round} className="flex gap-2 mb-2">
+                <div key={round} className="flex gap-2 mb-2 items-center">
                   {/* Round label */}
-                  <div className="w-16 flex-shrink-0 flex items-center justify-center">
-                    <Badge variant="outline" className="font-mono">
+                  <div className="w-16 flex-shrink-0 flex items-center justify-center relative group">
+                    <Badge variant="outline" className="font-mono bg-white z-10">
                       R{round}
                     </Badge>
+                    {isSnake && (
+                      <div className={cn(
+                        "absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity",
+                        isReversed ? "translate-x-full" : "-translate-x-full"
+                      )}>
+                        {isReversed ? <ArrowLeft className="w-4 h-4 text-slate-300" /> : <ArrowRight className="w-4 h-4 text-slate-300" />}
+                      </div>
+                    )}
                   </div>
 
                   {/* Picks in round */}
-                  {teams.map((_, teamIndex) => {
-                    const position = teamIndex + 1;
-                    const displayPosition = isReversed
-                      ? teams.length - teamIndex
-                      : position;
-                    const overallPick = getOverallPick(round, displayPosition);
-                    const team = getTeamForPick(overallPick);
-                    const pick = roundPicks[teamIndex] ?? null;
+                  {roundPicks.map((pick, teamIndex) => {
+                    const team = getTeamForPick(pick?.overallPickNumber || ((round - 1) * teams.length + teamIndex + 1));
                     const isTraded = pick
                       ? pick.originalOwnerId !== pick.currentOwnerId
                       : false;
+
+                    const pickNum = pick?.overallPickNumber || ((round - 1) * teams.length + teamIndex + 1);
 
                     return (
                       <PickCell
@@ -352,14 +364,21 @@ export function DraftBoard({
                         pick={pick}
                         team={team}
                         round={round}
-                        pickNumber={overallPick}
-                        isCurrentPick={overallPick === currentPick}
+                        pickNumber={pickNum}
+                        isCurrentPick={pickNum === currentPick}
                         isPaused={isPaused}
                         isMyTeam={team.id === myTeamId}
                         isTraded={isTraded}
                       />
                     );
                   })}
+
+                  {/* Direction Indicator for Snake */}
+                  {isSnake && (
+                    <div className="w-8 flex flex-col items-center justify-center text-slate-300">
+                      {!isReversed ? <ArrowRight className="w-5 h-5 animate-pulse" /> : <ArrowLeft className="w-5 h-5 opacity-20" />}
+                    </div>
+                  )}
                 </div>
               );
             })}

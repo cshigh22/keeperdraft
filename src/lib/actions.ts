@@ -31,7 +31,7 @@ export async function getTeamsByLeague(leagueId: string = 'demo-league') {
             id: team.id,
             name: team.name,
             ownerId: team.ownerId,
-            ownerName: team.owner.name || team.owner.email,
+            ownerName: team.owner?.name || team.owner?.email || 'Open Slot',
             isCommissioner: team.ownerId === league?.commissionerId,
         }));
     } catch (error) {
@@ -65,12 +65,10 @@ export async function getMyTeam(leagueId: string) {
         const session = await auth();
         if (!session?.user?.id) return null;
 
-        const team = await prisma.team.findUnique({
+        const team = await prisma.team.findFirst({
             where: {
-                leagueId_ownerId: {
-                    leagueId,
-                    ownerId: session.user.id,
-                },
+                leagueId,
+                ownerId: session.user.id,
             },
         });
 

@@ -14,14 +14,14 @@ model User {
   passwordHash  String?
   name          String?
   image         String?
-  avatarUrl     String?        // Legacy/Custom
+  avatarUrl     String?
   isAdmin       Boolean        @default(false)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   accounts      Account[]
-  sessions      Session[]
   leaguesOwned  League[]       @relation("LeagueCommissioner")
   leagueMembers LeagueMember[]
+  sessions      Session[]
   ownedTeams    Team[]
 
   @@index([email])
@@ -33,15 +33,14 @@ model Account {
   type              String
   provider          String
   providerAccountId String
-  refresh_token     String? @db.Text
-  access_token      String? @db.Text
+  refresh_token     String?
+  access_token      String?
   expires_at        Int?
   token_type        String?
   scope             String?
-  id_token          String? @db.Text
+  id_token          String?
   session_state     String?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerAccountId])
   @@index([userId])
@@ -90,10 +89,10 @@ model League {
   draftSettings  DraftSettings?
   draftState     DraftState?
   commissioner   User           @relation("LeagueCommissioner", fields: [commissionerId], references: [id])
+  invites        LeagueInvite[]
   members        LeagueMember[]
   teams          Team[]
   trades         Trade[]
-  invites        LeagueInvite[]
 
   @@index([commissionerId])
   @@index([season])
@@ -123,6 +122,7 @@ model Team {
   updatedAt       DateTime       @updatedAt
   ownedPicks      DraftPick[]    @relation("CurrentPickOwner")
   originalPicks   DraftPick[]    @relation("OriginalPickOwner")
+  draftQueue      DraftQueue[]
   players         PlayerRoster[]
   league          League         @relation(fields: [leagueId], references: [id], onDelete: Cascade)
   owner           User?          @relation(fields: [ownerId], references: [id])
@@ -154,6 +154,7 @@ model Player {
   byeWeek      Int?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
+  draftQueues  DraftQueue[]
   rosters      PlayerRoster[]
   tradeAssets  TradeAsset[]
 
@@ -161,6 +162,20 @@ model Player {
   @@index([nflTeam])
   @@index([fullName])
   @@index([rank])
+}
+
+model DraftQueue {
+  id        String   @id @default(cuid())
+  teamId    String
+  playerId  String
+  rank      Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  player    Player   @relation(fields: [playerId], references: [id])
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, playerId])
+  @@index([teamId])
 }
 
 model PlayerRoster {

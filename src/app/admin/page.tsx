@@ -4,6 +4,9 @@
 'use client';
 
 import React, { useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { useSession } from 'next-auth/react';
+import { getMyTeam } from '@/lib/actions';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -48,37 +51,14 @@ import { useDraftSocket } from '@/hooks/useDraftSocket';
 import { updateDraftSettingsAction, getDraftSettingsAction } from '@/app/actions/commissioner';
 
 // ============================================================================
-// MOCK SESSION (Replace with real auth in production)
-// ============================================================================
-
-function useMockSession() {
-  const [session, setSession] = useState<{
-    userId: string;
-    teamId: string;
-    teamName: string;
-    isCommissioner: boolean;
-  } | null>(null);
-
-  useState(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('draftSession');
-      if (stored) {
-        setSession(JSON.parse(stored));
-      }
-    }
-  });
-
-  return session;
-}
-
-const MOCK_LEAGUE_ID = 'demo-league';
-
-// ============================================================================
 // COMMISSIONER DASHBOARD
 // ============================================================================
 
 export default function CommissionerDashboard() {
-  const session = useMockSession();
+  const { data: authSession, status: authStatus } = useSession();
+  const searchParams = useSearchParams();
+  const leagueId = searchParams.get('leagueId') || '';
+  const [userTeam, setUserTeam] = useState<any | null>(null);
   const [timerDuration, setTimerDuration] = useState('90');
   const [pauseReason, setPauseReason] = useState('');
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -90,29 +70,34 @@ export default function CommissionerDashboard() {
   const [maxKeepers, setMaxKeepers] = useState(3);
   const [keeperDeadline, setKeeperDeadline] = useState('');
 
-  // Fetch settings
+  // Fetch team and settings
   React.useEffect(() => {
-    async function fetchSettings() {
-      const result = await getDraftSettingsAction(MOCK_LEAGUE_ID);
-      if (result.success && result.data) {
-        setMaxKeepers(result.data.maxKeepers || 3);
-        setTimerDuration(result.data.timerDurationSeconds?.toString() || '90');
-        if (result.data.keeperDeadline) {
-          // Format for datetime-local: YYYY-MM-DDThh:mm
-          const d = new Date(result.data.keeperDeadline);
-          // Handling naive local time conversion for input value
-          const offset = d.getTimezoneOffset() * 60000;
-          const localISOTime = (new Date(d.getTime() - offset)).toISOString().slice(0, 16);
-          setKeeperDeadline(localISOTime);
+    async function fetchData() {
+      if (authSession?.user?.id && leagueId) {
+        const team = await getMyTeam(leagueId);
+        setUserTeam(team);
+
+        const result = await getDraftSettingsAction(leagueId);
+        if (result.success && result.data) {
+          setMaxKeepers(result.data.maxKeepers || 3);
+          setTimerDuration(result.data.timerDurationSeconds?.toString() || '90');
+          if (result.data.keeperDeadline) {
+            const d = new Date(result.data.keeperDeadline);
+            const offset = d.getTimezoneOffset() * 60000;
+            const localISOTime = (new Date(d.getTime() - offset)).toISOString().slice(0, 16);
+            setKeeperDeadline(localISOTime);
+          }
         }
       }
     }
-    fetchSettings();
-  }, []);
+    if (authStatus !== 'loading') {
+      fetchData();
+    }
+  }, [authSession, authStatus, leagueId]);
 
   const handleUpdateSettings = async () => {
     await updateDraftSettingsAction({
-      leagueId: MOCK_LEAGUE_ID,
+      leagueId,
       maxKeepers,
       keeperDeadline: keeperDeadline ? new Date(keeperDeadline) : null,
       timerDurationSeconds: parseInt(timerDuration),
@@ -121,13 +106,13 @@ export default function CommissionerDashboard() {
   };
 
   const { state, actions } = useDraftSocket({
-    leagueId: MOCK_LEAGUE_ID,
-    userId: session?.userId || '',
-    teamId: session?.teamId,
+    leagueId,
+    userId: authSession?.user?.id || '',
+    teamId: userTeam?.id,
   });
 
   // Check if session is loaded
-  if (!session) {
+  if (authStatus === 'loading' || (authSession && !userTeam && leagueId)) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <Loader2 className="w-8 h-8 animate-spin" />
@@ -135,8 +120,7 @@ export default function CommissionerDashboard() {
     );
   }
 
-  // Check if user is commissioner (in production, use actual auth)
-  if (!session.isCommissioner) {
+  if (!authSession || !userTeam) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <Card className="max-w-md">
@@ -176,7 +160,7 @@ export default function CommissionerDashboard() {
               <div>
                 <h1 className="text-2xl font-bold">Commissioner Dashboard</h1>
                 <p className="text-sm text-muted-foreground">
-                  Manage your league's draft
+                  Manage your league&apos;s draft
                 </p>
               </div>
             </div>

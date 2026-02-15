@@ -106,6 +106,14 @@ export default async function LeagueDetailPage({
                         </Button>
                     </Link>
                 )}
+                {isCommissioner && (
+                    <Link href={`/leagues/${league.id}/settings`}>
+                        <Button variant="outline">
+                            <Settings className="mr-2 h-4 w-4" />
+                            League Settings
+                        </Button>
+                    </Link>
+                )}
                 {isCommissioner && <InviteLinkButton leagueId={league.id} />}
             </div>
 
@@ -141,11 +149,21 @@ export default async function LeagueDetailPage({
                                             </p>
                                         </div>
                                     </div>
-                                    {team.ownerId === league.commissionerId && (
-                                        <Badge variant="outline" className="text-xs">
-                                            Commissioner
-                                        </Badge>
-                                    )}
+                                    <div className="flex items-center gap-2">
+                                        {isCommissioner && team.ownerId && (
+                                            <Link href={`/leagues/${league.id}/keepers?teamId=${team.id}`}>
+                                                <Button variant="ghost" size="sm" className="text-xs h-7">
+                                                    <Trophy className="mr-1 h-3 w-3" />
+                                                    Keepers
+                                                </Button>
+                                            </Link>
+                                        )}
+                                        {team.ownerId === league.commissionerId && (
+                                            <Badge variant="outline" className="text-xs">
+                                                Commissioner
+                                            </Badge>
+                                        )}
+                                    </div>
                                 </div>
                             ))}
                         </div>

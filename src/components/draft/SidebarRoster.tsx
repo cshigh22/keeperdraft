@@ -67,9 +67,9 @@ export function SidebarRoster({
         [teamRosters, selectedTeamId]
     );
 
-    const settings = rosterSettings || {
+    const settings = useMemo(() => rosterSettings || {
         qbCount: 1, rbCount: 2, wrCount: 3, teCount: 1, flexCount: 2, superflexCount: 0, kCount: 1, defCount: 1, benchCount: 9,
-    };
+    }, [rosterSettings]);
 
     // Organize roster into slots
     const organizedRoster = useMemo(() => {

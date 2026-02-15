@@ -49,6 +49,7 @@ export interface DraftState {
   pendingTrades: TradeOfferedPayload[];
   totalRounds: number;
   draftType: 'SNAKE' | 'LINEAR';
+  teamQueues: Record<string, PlayerSummary[]>;
   rosterSettings?: {
     qbCount: number;
     rbCount: number;
@@ -97,6 +98,7 @@ interface UseDraftSocketReturn {
     forcePick: (playerId: string) => void;
     undoLastPick: () => void;
     updateOrder: (teamOrder: string[]) => void;
+    updateQueue: (teamId: string, playerIds: string[]) => void;
   };
   disconnect: () => void;
   reconnect: () => void;
@@ -124,6 +126,7 @@ const initialState: DraftState = {
   pendingTrades: [],
   totalRounds: 14,
   draftType: 'SNAKE',
+  teamQueues: {},
   lastUpdate: null,
   error: null,
 };
@@ -245,6 +248,8 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
         pendingTrades: payload.pendingTrades,
         totalRounds: payload.totalRounds || 14,
         draftType: payload.draftType || 'SNAKE',
+        rosterSettings: payload.rosterSettings,
+        teamQueues: payload.teamQueues || {},
         lastUpdate: new Date(),
       }));
     });
@@ -453,6 +458,18 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       }));
     });
 
+    // Queue updated
+    socket.on(SocketEvents.QUEUE_UPDATED, (payload) => {
+      setState((prev) => ({
+        ...prev,
+        teamQueues: {
+          ...prev.teamQueues,
+          [payload.teamId]: payload.queue,
+        },
+        lastUpdate: new Date(),
+      }));
+    });
+
     // Error handling
     socket.on(SocketEvents.ERROR, (payload: ErrorPayload) => {
       setState((prev) => ({ ...prev, error: payload }));
@@ -543,6 +560,11 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
     updateOrder: useCallback((teamOrder: string[]) => {
       if (!socketRef.current) return;
       socketRef.current.emit(SocketEvents.ORDER_UPDATED, { leagueId, teamOrder });
+    }, [leagueId]),
+
+    updateQueue: useCallback((teamId: string, playerIds: string[]) => {
+      if (!socketRef.current) return;
+      socketRef.current.emit(SocketEvents.UPDATE_QUEUE, { leagueId, teamId, playerIds });
     }, [leagueId]),
   };
 

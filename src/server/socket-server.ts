@@ -610,6 +610,38 @@ io.on(SocketEvents.CONNECTION, (socket) => {
       });
     }
   });
+  // -------------------------------------------------------------------------
+  // QUEUE UPDATED
+  // -------------------------------------------------------------------------
+  socket.on(SocketEvents.UPDATE_QUEUE, async (payload) => {
+    const { leagueId, teamId, playerIds } = payload;
+
+    try {
+      // Verify the user owns this team (or is commissioner)
+      const team = await prisma.team.findUnique({
+        where: { id: teamId },
+        select: { ownerId: true }
+      });
+
+      if (!team || (team.ownerId !== socket.data.userId && !socket.data.isCommissioner)) {
+        socket.emit(SocketEvents.ERROR, {
+          code: 'UNAUTHORIZED',
+          message: 'You do not have permission to update this queue'
+        });
+        return;
+      }
+
+      const manager = getDraftManager(leagueId);
+      await manager.updateQueue(teamId, playerIds);
+    } catch (error) {
+      console.error('Error updating queue:', error);
+      socket.emit(SocketEvents.ERROR, {
+        code: 'QUEUE_UPDATE_FAILED',
+        message: error instanceof Error ? error.message : 'Failed to update queue'
+      });
+    }
+  });
+
 
   // -------------------------------------------------------------------------
   // DISCONNECT

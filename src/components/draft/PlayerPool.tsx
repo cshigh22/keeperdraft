@@ -26,6 +26,8 @@ interface PlayerPoolProps {
     isMyTurn: boolean;
     onDraftPlayer: (playerId: string) => void;
     isLoading?: boolean;
+    teamQueue: PlayerSummary[];
+    onUpdateQueue: (playerIds: string[]) => void;
 }
 
 type PositionFilter = 'ALL' | 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DST';
@@ -52,22 +54,46 @@ export function PlayerPool({
     players,
     isMyTurn,
     onDraftPlayer,
+    teamQueue,
+    onUpdateQueue,
     isLoading = false,
 }: PlayerPoolProps) {
     const [search, setSearch] = useState('');
     const [positionFilter, setPositionFilter] = useState<PositionFilter>('ALL');
-    const [favorites, setFavorites] = useState<Set<string>>(new Set());
     const [showOnlyFavorites, setShowOnlyFavorites] = useState(false);
+    const [activeTab, setActiveTab] = useState<'POOL' | 'QUEUE'>('POOL');
 
-    // Toggle favorite
+    // Sync favorites with teamQueue from props
+    // We'll use the teamQueue as the source of truth for "stars"
+    const favorites = useMemo(() => new Set(teamQueue.map(p => p.id)), [teamQueue]);
+
+    // Toggle favorite (Add/Remove from Queue)
     const toggleFavorite = (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
-        setFavorites(prev => {
-            const next = new Set(prev);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
-            return next;
-        });
+        if (favorites.has(id)) {
+            onUpdateQueue(teamQueue.filter(p => p.id !== id).map(p => p.id));
+        } else {
+            onUpdateQueue([...teamQueue.map(p => p.id), id]);
+        }
+    };
+
+    const moveQueuedPlayer = (id: string, direction: 'UP' | 'DOWN') => {
+        const index = teamQueue.findIndex(p => p.id === id);
+        if (index === -1) return;
+
+        const newQueue = [...teamQueue];
+        if (direction === 'UP' && index > 0) {
+            const temp = newQueue[index] as PlayerSummary;
+            newQueue[index] = newQueue[index - 1] as PlayerSummary;
+            newQueue[index - 1] = temp;
+        } else if (direction === 'DOWN' && index < newQueue.length - 1) {
+            const temp = newQueue[index] as PlayerSummary;
+            newQueue[index] = newQueue[index + 1] as PlayerSummary;
+            newQueue[index + 1] = temp;
+        } else {
+            return;
+        }
+        onUpdateQueue(newQueue.map(p => p.id));
     };
 
     // Filtered players
@@ -114,37 +140,33 @@ export function PlayerPool({
                     />
                 </div>
 
-                {/* Position Filters */}
-                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-                    {(['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST'] as PositionFilter[]).map((pos) => (
-                        <button
-                            key={pos}
-                            onClick={() => {
-                                setPositionFilter(pos);
-                                setShowOnlyFavorites(false);
-                            }}
-                            className={cn(
-                                "px-3 py-1.5 rounded-md text-[11px] font-bold transition-all border shrink-0",
-                                positionFilter === pos && !showOnlyFavorites
-                                    ? "bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/20"
-                                    : "bg-slate-100 border-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-200"
-                            )}
-                        >
-                            {pos}
-                        </button>
-                    ))}
-                    <button
-                        onClick={() => setShowOnlyFavorites(!showOnlyFavorites)}
-                        className={cn(
-                            "p-2 rounded-md transition-all border shrink-0",
-                            showOnlyFavorites
-                                ? "bg-yellow-500 border-yellow-400 text-white shadow-lg shadow-yellow-500/20"
-                                : "bg-slate-100 border-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-200"
-                        )}
-                    >
-                        <Star className={cn("w-3.5 h-3.5", showOnlyFavorites && "fill-current")} />
-                    </button>
-                </div>
+            </div>
+
+            {/* Tab Switcher */}
+            <div className="flex border-b border-slate-200">
+                <button
+                    onClick={() => setActiveTab('POOL')}
+                    className={cn(
+                        "flex-1 py-2 text-xs font-bold transition-all border-b-2",
+                        activeTab === 'POOL' ? "border-blue-600 text-blue-600" : "border-transparent text-slate-500 hover:text-slate-700"
+                    )}
+                >
+                    PLAYERS
+                </button>
+                <button
+                    onClick={() => setActiveTab('QUEUE')}
+                    className={cn(
+                        "flex-1 py-2 text-xs font-bold transition-all border-b-2 relative",
+                        activeTab === 'QUEUE' ? "border-blue-600 text-blue-600" : "border-transparent text-slate-500 hover:text-slate-700"
+                    )}
+                >
+                    QUEUE
+                    {teamQueue.length > 0 && (
+                        <span className="absolute top-1 right-4 w-4 h-4 bg-blue-600 text-white text-[9px] rounded-full flex items-center justify-center">
+                            {teamQueue.length}
+                        </span>
+                    )}
+                </button>
             </div>
 
             {/* Table Headers */}
@@ -159,116 +181,202 @@ export function PlayerPool({
             {/* Player List */}
             <ScrollArea className="flex-1">
                 <div className="divide-y divide-white/5">
-                    {filteredPlayers.length === 0 ? (
-                        <div className="flex flex-col items-center justify-center py-20 text-slate-400 space-y-2">
-                            <Search className="w-12 h-12 opacity-10" />
-                            <p className="text-sm font-medium">No players found</p>
-                        </div>
-                    ) : (
-                        filteredPlayers.map((player) => {
-                            return (
-                                <div
-                                    key={player.id}
-                                    className={cn(
-                                        "grid grid-cols-[36px,44px,1fr,44px,44px] gap-2 px-4 py-2.5 items-center transition-all group",
-                                        "relative border-b border-slate-100",
-                                        "hover:bg-slate-50"
-                                    )}
-                                >
-                                    {/* Star Overlay on hover */}
+                    {activeTab === 'POOL' ? (
+                        <>
+                            {/* Position Filters inside POOL tab */}
+                            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar p-3 bg-slate-50/50">
+                                {(['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST'] as PositionFilter[]).map((pos) => (
                                     <button
-                                        onClick={(e) => toggleFavorite(player.id, e)}
+                                        key={pos}
+                                        onClick={() => setPositionFilter(pos)}
                                         className={cn(
-                                            "absolute left-1 top-1/2 -translate-y-1/2 p-1 transition-opacity",
-                                            favorites.has(player.id) ? "opacity-100 text-yellow-500" : "opacity-0 group-hover:opacity-100 text-slate-300"
+                                            "px-3 py-1.5 rounded-md text-[10px] font-bold transition-all border shrink-0",
+                                            positionFilter === pos
+                                                ? "bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-500/10"
+                                                : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
                                         )}
                                     >
-                                        <Star className={cn("w-3 h-3", favorites.has(player.id) && "fill-current")} />
+                                        {pos}
                                     </button>
+                                ))}
+                            </div>
 
-                                    {/* Rank */}
-                                    <div className="text-center text-xs font-mono text-slate-500 ml-4">
-                                        {player.rank || '-'}
-                                    </div>
-
-                                    {/* Position */}
-                                    <div className="flex justify-center">
-                                        <span className={cn(
-                                            "w-9 py-0.5 rounded-sm text-[9px] font-black border text-center",
-                                            positionBadgeColors[player.position] || "bg-slate-700/50 text-slate-400 border-slate-600"
-                                        )}>
-                                            {player.position}
-                                        </span>
-                                    </div>
-
-                                    {/* Player Name & Team */}
-                                    <div className="pl-2 min-w-0 flex items-center justify-between">
-                                        <div className="min-w-0">
-                                            <div className="flex items-center gap-1.5">
-                                                <span className={cn(
-                                                    "text-xs font-bold truncate transition-colors",
-                                                    "text-slate-900 group-hover:text-blue-600"
-                                                )}>
-                                                    {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
-                                                </span>
-                                                {player.injuryStatus && (
-                                                    <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
-                                                        {player.injuryStatus}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div className="text-[10px] text-slate-500 font-medium uppercase">{player.nflTeam || 'FA'}</div>
-                                        </div>
-
-                                        {isMyTurn && (
-                                            <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    onDraftPlayer(player.id);
-                                                }}
-                                                className={cn(
-                                                    "opacity-0 group-hover:opacity-100 transition-all duration-200",
-                                                    "bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white",
-                                                    "text-[9px] font-black px-2.5 py-1 rounded-sm shadow-lg shadow-blue-500/30",
-                                                    "hover:scale-110 active:scale-95 shrink-0 ml-3"
-                                                )}
-                                            >
-                                                DRAFT
-                                            </button>
-                                        )}
-                                    </div>
-
-                                    {/* ADP */}
-                                    <div className="text-center text-[11px] font-medium text-slate-400">
-                                        {player.adp ? Math.round(player.adp) : '-'}
-                                    </div>
-
-                                    {/* BYE */}
-                                    <div className="text-center text-[11px] font-medium text-slate-400">
-                                        {player.bye || '-'}
-                                    </div>
+                            {filteredPlayers.length === 0 ? (
+                                <div className="flex flex-col items-center justify-center py-20 text-slate-400 space-y-2">
+                                    <Search className="w-12 h-12 opacity-10" />
+                                    <p className="text-sm font-medium">No players found</p>
                                 </div>
-                            );
-                        })
+                            ) : (
+                                filteredPlayers.map((player) => (
+                                    <PlayerRow
+                                        key={player.id}
+                                        player={player}
+                                        isMyTurn={isMyTurn}
+                                        onDraftPlayer={onDraftPlayer}
+                                        isFavorited={favorites.has(player.id)}
+                                        onToggleFavorite={toggleFavorite}
+                                    />
+                                ))
+                            )}
+                        </>
+                    ) : (
+                        <div className="flex flex-col h-full">
+                            {teamQueue.length === 0 ? (
+                                <div className="flex flex-col items-center justify-center py-20 text-slate-400 space-y-2">
+                                    <Star className="w-12 h-12 opacity-10" />
+                                    <p className="text-sm font-medium text-center px-6">Your queue is empty. Star players from the pool to add them here.</p>
+                                </div>
+                            ) : (
+                                teamQueue.map((player, index) => (
+                                    <div key={player.id} className="relative group">
+                                        <PlayerRow
+                                            player={player}
+                                            isMyTurn={isMyTurn}
+                                            onDraftPlayer={onDraftPlayer}
+                                            isFavorited={true}
+                                            onToggleFavorite={toggleFavorite}
+                                            showOrderControls
+                                            isFirst={index === 0}
+                                            isLast={index === teamQueue.length - 1}
+                                            onMove={moveQueuedPlayer}
+                                        />
+                                    </div>
+                                ))
+                            )}
+                        </div>
                     )}
                 </div>
             </ScrollArea>
+        </div>
+    );
+}
+// ============================================================================
+// HELPER COMPONENTS
+// ============================================================================
 
-            {/* Bottom Tooltip Bar */}
-            <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center gap-2">
-                <TooltipProvider>
-                    <Tooltip>
-                        <TooltipTrigger asChild>
-                            <Info className="w-4 h-4 text-slate-600 cursor-help" />
-                        </TooltipTrigger>
-                        <TooltipContent>
-                            <p className="max-w-[200px] text-xs">
-                                Hover over a player and click "DRAFT" to pick them.
-                            </p>
-                        </TooltipContent>
-                    </Tooltip>
-                </TooltipProvider>
-                <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Controls</span>
+interface PlayerRowProps {
+    player: PlayerSummary;
+    isMyTurn: boolean;
+    onDraftPlayer: (playerId: string) => void;
+    isFavorited: boolean;
+    onToggleFavorite: (id: string, e: React.MouseEvent) => void;
+    showOrderControls?: boolean;
+    isFirst?: boolean;
+    isLast?: boolean;
+    onMove?: (id: string, direction: 'UP' | 'DOWN') => void;
+}
+
+function PlayerRow({
+    player,
+    isMyTurn,
+    onDraftPlayer,
+    isFavorited,
+    onToggleFavorite,
+    showOrderControls,
+    isFirst,
+    isLast,
+    onMove,
+}: PlayerRowProps) {
+    return (
+        <div
+            className={cn(
+                "grid grid-cols-[36px,44px,1fr,44px,44px] gap-2 px-4 py-2.5 items-center transition-all group",
+                "relative border-b border-slate-100",
+                "hover:bg-slate-50"
+            )}
+        >
+            {/* Star Overlay on hover */}
+            <button
+                onClick={(e) => onToggleFavorite(player.id, e)}
+                className={cn(
+                    "absolute left-1 top-1/2 -translate-y-1/2 p-1 transition-opacity",
+                    isFavorited ? "opacity-100 text-yellow-500" : "opacity-0 group-hover:opacity-100 text-slate-300"
+                )}
+            >
+                <Star className={cn("w-3 h-3", isFavorited && "fill-current")} />
+            </button>
+
+            {/* Rank or Order Controls */}
+            <div className="flex flex-col items-center justify-center ml-4">
+                {showOrderControls ? (
+                    <div className="flex flex-col -space-y-1">
+                        <button
+                            disabled={isFirst}
+                            onClick={() => onMove?.(player.id, 'UP')}
+                            className={cn("p-0.5 hover:text-blue-600 disabled:opacity-0")}
+                        >
+                            <Info className="w-3 h-3 rotate-180" /> {/* Placeholder for up arrow */}
+                        </button>
+                        <button
+                            disabled={isLast}
+                            onClick={() => onMove?.(player.id, 'DOWN')}
+                            className={cn("p-0.5 hover:text-blue-600 disabled:opacity-0")}
+                        >
+                            <Info className="w-3 h-3" /> {/* Placeholder for down arrow */}
+                        </button>
+                    </div>
+                ) : (
+                    <div className="text-center text-xs font-mono text-slate-500">
+                        {player.rank || '-'}
+                    </div>
+                )}
+            </div>
+
+            {/* Position */}
+            <div className="flex justify-center">
+                <span className={cn(
+                    "w-9 py-0.5 rounded-sm text-[9px] font-black border text-center",
+                    positionBadgeColors[player.position] || "bg-slate-700/50 text-slate-400 border-slate-600"
+                )}>
+                    {player.position}
+                </span>
+            </div>
+
+            {/* Player Name & Team */}
+            <div className="pl-2 min-w-0 flex items-center justify-between">
+                <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                        <span className={cn(
+                            "text-xs font-bold truncate transition-colors",
+                            "text-slate-900 group-hover:text-blue-600"
+                        )}>
+                            {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
+                        </span>
+                        {player.injuryStatus && (
+                            <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
+                                {player.injuryStatus}
+                            </span>
+                        )}
+                    </div>
+                    <div className="text-[10px] text-slate-500 font-medium uppercase">{player.nflTeam || 'FA'}</div>
+                </div>
+
+                {isMyTurn && (
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onDraftPlayer(player.id);
+                        }}
+                        className={cn(
+                            "opacity-0 group-hover:opacity-100 transition-all duration-200",
+                            "bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white",
+                            "text-[9px] font-black px-2.5 py-1 rounded-sm shadow-lg shadow-blue-500/30",
+                            "hover:scale-110 active:scale-95 shrink-0 ml-3"
+                        )}
+                    >
+                        DRAFT
+                    </button>
+                )}
+            </div>
+
+            {/* ADP */}
+            <div className="text-center text-[11px] font-medium text-slate-400">
+                {player.adp ? Math.round(player.adp) : '-'}
+            </div>
+
+            {/* BYE */}
+            <div className="text-center text-[11px] font-medium text-slate-400">
+                {player.bye || '-'}
             </div>
         </div>
     );

@@ -32,6 +32,15 @@ export interface DraftSettingsInput {
   reserveTimeSeconds?: number;
   pauseOnTrade?: boolean;
   maxKeepers?: number;
+  qbCount?: number;
+  rbCount?: number;
+  wrCount?: number;
+  teCount?: number;
+  flexCount?: number;
+  superflexCount?: number;
+  kCount?: number;
+  defCount?: number;
+  benchCount?: number;
   keeperDeadline?: Date | null;
   scheduledStartTime?: Date;
 }
@@ -123,7 +132,7 @@ export const CommissionerService = {
             id: team.id,
             name: team.name,
             draftPosition: index + 1,
-            ownerName: team.owner.name,
+            ownerName: team.owner?.name ?? 'No Owner',
           };
         })
       );
@@ -305,6 +314,15 @@ export const CommissionerService = {
         reserveTimeSeconds: settings.reserveTimeSeconds || 120,
         pauseOnTrade: settings.pauseOnTrade ?? true,
         maxKeepers: settings.maxKeepers || 3,
+        qbCount: settings.qbCount || 1,
+        rbCount: settings.rbCount || 2,
+        wrCount: settings.wrCount || 3,
+        teCount: settings.teCount || 1,
+        flexCount: settings.flexCount || 2,
+        superflexCount: settings.superflexCount || 0,
+        kCount: settings.kCount || 1,
+        defCount: settings.defCount || 1,
+        benchCount: settings.benchCount || 9,
         scheduledStartTime: settings.scheduledStartTime,
       },
       update: settings,

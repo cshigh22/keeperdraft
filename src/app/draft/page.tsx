@@ -4,6 +4,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -48,7 +49,6 @@ import type { TradeOfferedPayload } from '@/types/socket';
 // ============================================================================
 
 // DELETED useMockSession
-const MOCK_LEAGUE_ID = 'demo-league';
 
 // ============================================================================
 // DRAFT ROOM PAGE
@@ -56,6 +56,8 @@ const MOCK_LEAGUE_ID = 'demo-league';
 
 export default function DraftRoom() {
   const { data: session, status } = useSession();
+  const searchParams = useSearchParams();
+  const leagueId = searchParams.get('leagueId') || '';
   const [userTeam, setUserTeam] = useState<any | null>(null);
   const [incomingTrade, setIncomingTrade] = useState<TradeOfferedPayload | null>(null);
   const [notificationCount, setNotificationCount] = useState(0);
@@ -66,7 +68,7 @@ export default function DraftRoom() {
   useEffect(() => {
     async function fetchTeam() {
       if (session?.user?.id) {
-        const team = await getMyTeam(MOCK_LEAGUE_ID);
+        const team = await getMyTeam(leagueId);
         setUserTeam(team);
       }
       setIsInitializing(false);
@@ -74,7 +76,7 @@ export default function DraftRoom() {
     if (status !== 'loading') {
       fetchTeam();
     }
-  }, [session, status]);
+  }, [session, status, leagueId]);
 
   // Socket connection
   const {
@@ -83,7 +85,7 @@ export default function DraftRoom() {
     myTeam,
     actions,
   } = useDraftSocket({
-    leagueId: MOCK_LEAGUE_ID,
+    leagueId,
     userId: session?.user?.id || '',
     teamId: userTeam?.id,
     onTradeOffered: (trade) => {
@@ -123,7 +125,7 @@ export default function DraftRoom() {
           <Trophy className="w-12 h-12 text-primary mx-auto mb-4" />
           <h1 className="text-2xl font-bold mb-2">No Team Found</h1>
           <p className="text-muted-foreground mb-6">
-            You don't seem to have a team in this league. Please contact the commissioner for an invite.
+            You don&apos;t seem to have a team in this league. Please contact the commissioner for an invite.
           </p>
           <Button onClick={() => (window.location.href = '/login')}>
             Back to Dashboard
@@ -236,7 +238,7 @@ export default function DraftRoom() {
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => (window.location.href = '/admin')}
+                    onClick={() => (window.location.href = `/admin?leagueId=${leagueId}`)}
                     title="Commissioner Settings"
                   >
                     <Settings className="w-5 h-5" />
@@ -281,7 +283,7 @@ export default function DraftRoom() {
                       </Button>
                     </DialogTrigger>
                     <DialogContent className="sm:max-w-md">
-                      <InviteLinkButton leagueId={MOCK_LEAGUE_ID} />
+                      <InviteLinkButton leagueId={leagueId} />
                     </DialogContent>
                   </Dialog>
                 </>
@@ -299,7 +301,7 @@ export default function DraftRoom() {
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => window.location.href = `/leagues/${MOCK_LEAGUE_ID}/keepers?teamId=${userTeam.id}`}
+                onClick={() => window.location.href = `/leagues/${leagueId}/keepers?teamId=${userTeam.id}`}
                 title="Select Keepers"
               >
                 <Shield className="w-5 h-5" />
@@ -317,7 +319,7 @@ export default function DraftRoom() {
         {/* My turn banner */}
         {isMyTurn && (
           <div className="bg-green-500 text-white py-2 px-4 text-center font-semibold animate-pulse">
-            You're on the clock! Make your pick!
+            You&apos;re on the clock! Make your pick!
           </div>
         )}
 
@@ -340,7 +342,7 @@ export default function DraftRoom() {
             </div>
           </div>
           <Button
-            onClick={() => window.location.href = `/leagues/${MOCK_LEAGUE_ID}/keepers?teamId=${userTeam.id}`}
+            onClick={() => window.location.href = `/leagues/${leagueId}/keepers?teamId=${userTeam.id}`}
           >
             Declare Keepers
           </Button>
@@ -363,6 +365,7 @@ export default function DraftRoom() {
                 isPaused={state.isPaused}
                 draftType={state.draftType}
                 myTeamId={userTeam.id}
+                hideCompleted={true}
               />
             </div>
 
@@ -378,6 +381,8 @@ export default function DraftRoom() {
                 isMyTurn={isMyTurn}
                 onDraftPlayer={handleDraftPlayer}
                 isLoading={!state.isConnected}
+                teamQueue={state.teamQueues[userTeam.id] || []}
+                onUpdateQueue={(playerIds) => actions.updateQueue(userTeam.id, playerIds)}
               />
             </div>
 

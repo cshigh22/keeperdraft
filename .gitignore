@@ -39,3 +39,11 @@ next-env.d.ts
 # IDEs
 .vscode/
 .idea/
+
+# temporary debug scripts
+check_orphans.ts
+check-settings.ts
+test-keepers.ts
+verify_available_pool.ts
+scripts/*.ts
+!scripts/seed.ts # Example of a script you might want to keep

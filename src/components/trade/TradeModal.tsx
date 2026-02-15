@@ -252,7 +252,7 @@ export function TradeModal({
     });
 
     return assets;
-  }, [allPicks, totalRounds]);
+  }, [allPicks, totalRounds, allTeams]);
 
   // Convert my picks and players to TradeAssets
   const myTradeAssets: TradeAsset[] = useMemo(() => {
@@ -451,7 +451,7 @@ export function TradeModal({
                   <div className="bg-secondary/50 px-4 py-2 border-b">
                     <h3 className="font-semibold">{selectedTeam?.name}</h3>
                     <p className="text-xs text-muted-foreground">
-                      {selectedTeam?.ownerName}'s assets
+                      {selectedTeam?.ownerName}&apos;s assets
                     </p>
                   </div>
                   <ScrollArea className="h-64">
@@ -463,7 +463,7 @@ export function TradeModal({
                             Select assets from your team to offer.
                           </p>
                           <p className="text-xs mt-1">
-                            The other team's picks will be shown after selecting.
+                            The other team&apos;s picks will be shown after selecting.
                           </p>
                         </div>
                       ) : (
