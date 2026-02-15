@@ -8,7 +8,8 @@ import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Search, Star, Info } from 'lucide-react';
+import { Search, Star, Info, GripVertical } from 'lucide-react';
+import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import type { PlayerSummary } from '@/types/socket';
 import {
     Tooltip,
@@ -96,6 +97,16 @@ export function PlayerPool({
         onUpdateQueue(newQueue.map(p => p.id));
     };
 
+    const onDragEnd = (result: DropResult) => {
+        if (!result.destination) return;
+
+        const items = [...teamQueue];
+        const [reorderedItem] = items.splice(result.source.index, 1);
+        items.splice(result.destination.index, 0, reorderedItem!);
+
+        onUpdateQueue(items.map(p => p.id));
+    };
+
     // Filtered players
     const filteredPlayers = useMemo(() => {
         let result = [...players];
@@ -170,12 +181,18 @@ export function PlayerPool({
             </div>
 
             {/* Table Headers */}
-            <div className="grid grid-cols-[36px,44px,1fr,44px,44px] gap-2 px-4 py-2 bg-slate-50 border-y border-slate-200 text-[10px] font-bold text-slate-500 tracking-widest uppercase">
+            <div className={cn(
+                "grid gap-2 px-4 py-2 bg-slate-50 border-y border-slate-200 text-[10px] font-bold text-slate-500 tracking-widest uppercase",
+                activeTab === 'QUEUE'
+                    ? "grid-cols-[36px,44px,1fr,44px,44px,36px]"
+                    : "grid-cols-[36px,44px,1fr,44px,44px]"
+            )}>
                 <div className="text-center font-mono ml-4">#</div>
                 <div className="text-center">POS</div>
                 <div className="pl-2">PLAYER</div>
                 <div className="text-center">ADP</div>
                 <div className="text-center">BYE</div>
+                {activeTab === 'QUEUE' && <div className="text-center"></div>}
             </div>
 
             {/* Player List */}
@@ -227,21 +244,44 @@ export function PlayerPool({
                                     <p className="text-sm font-medium text-center px-6">Your queue is empty. Star players from the pool to add them here.</p>
                                 </div>
                             ) : (
-                                teamQueue.map((player, index) => (
-                                    <div key={player.id} className="relative group">
-                                        <PlayerRow
-                                            player={player}
-                                            isMyTurn={isMyTurn}
-                                            onDraftPlayer={onDraftPlayer}
-                                            isFavorited={true}
-                                            onToggleFavorite={toggleFavorite}
-                                            showOrderControls
-                                            isFirst={index === 0}
-                                            isLast={index === teamQueue.length - 1}
-                                            onMove={moveQueuedPlayer}
-                                        />
-                                    </div>
-                                ))
+                                <DragDropContext onDragEnd={onDragEnd}>
+                                    <Droppable droppableId="queue">
+                                        {(provided) => (
+                                            <div
+                                                {...provided.droppableProps}
+                                                ref={provided.innerRef}
+                                                className="flex flex-col h-full"
+                                            >
+                                                {teamQueue.map((player, index) => (
+                                                    <Draggable key={player.id} draggableId={player.id} index={index}>
+                                                        {(provided, snapshot) => (
+                                                            <div
+                                                                ref={provided.innerRef}
+                                                                {...provided.draggableProps}
+                                                                style={{
+                                                                    ...provided.draggableProps.style,
+                                                                    opacity: snapshot.isDragging ? 0.8 : 1,
+                                                                    zIndex: snapshot.isDragging ? 50 : 1
+                                                                }}
+                                                            >
+                                                                <PlayerRow
+                                                                    player={player}
+                                                                    isMyTurn={isMyTurn}
+                                                                    onDraftPlayer={onDraftPlayer}
+                                                                    isFavorited={true}
+                                                                    onToggleFavorite={toggleFavorite}
+                                                                    showOrderControls
+                                                                    dragHandleProps={provided.dragHandleProps}
+                                                                />
+                                                            </div>
+                                                        )}
+                                                    </Draggable>
+                                                ))}
+                                                {provided.placeholder}
+                                            </div>
+                                        )}
+                                    </Droppable>
+                                </DragDropContext>
                             )}
                         </div>
                     )}
@@ -261,9 +301,7 @@ interface PlayerRowProps {
     isFavorited: boolean;
     onToggleFavorite: (id: string, e: React.MouseEvent) => void;
     showOrderControls?: boolean;
-    isFirst?: boolean;
-    isLast?: boolean;
-    onMove?: (id: string, direction: 'UP' | 'DOWN') => void;
+    dragHandleProps?: any;
 }
 
 function PlayerRow({
@@ -273,16 +311,15 @@ function PlayerRow({
     isFavorited,
     onToggleFavorite,
     showOrderControls,
-    isFirst,
-    isLast,
-    onMove,
+    dragHandleProps,
 }: PlayerRowProps) {
     return (
         <div
             className={cn(
-                "grid grid-cols-[36px,44px,1fr,44px,44px] gap-2 px-4 py-2.5 items-center transition-all group",
+                "grid gap-2 px-4 py-2.5 items-center transition-all group",
                 "relative border-b border-slate-100",
-                "hover:bg-slate-50"
+                "hover:bg-slate-50",
+                showOrderControls ? "grid-cols-[36px,44px,1fr,44px,44px,36px]" : "grid-cols-[36px,44px,1fr,44px,44px]"
             )}
         >
             {/* Star Overlay on hover */}
@@ -296,30 +333,11 @@ function PlayerRow({
                 <Star className={cn("w-3 h-3", isFavorited && "fill-current")} />
             </button>
 
-            {/* Rank or Order Controls */}
+            {/* Rank */}
             <div className="flex flex-col items-center justify-center ml-4">
-                {showOrderControls ? (
-                    <div className="flex flex-col -space-y-1">
-                        <button
-                            disabled={isFirst}
-                            onClick={() => onMove?.(player.id, 'UP')}
-                            className={cn("p-0.5 hover:text-blue-600 disabled:opacity-0")}
-                        >
-                            <Info className="w-3 h-3 rotate-180" /> {/* Placeholder for up arrow */}
-                        </button>
-                        <button
-                            disabled={isLast}
-                            onClick={() => onMove?.(player.id, 'DOWN')}
-                            className={cn("p-0.5 hover:text-blue-600 disabled:opacity-0")}
-                        >
-                            <Info className="w-3 h-3" /> {/* Placeholder for down arrow */}
-                        </button>
-                    </div>
-                ) : (
-                    <div className="text-center text-xs font-mono text-slate-500">
-                        {player.rank || '-'}
-                    </div>
-                )}
+                <div className="text-center text-xs font-mono text-slate-500">
+                    {player.rank || '-'}
+                </div>
             </div>
 
             {/* Position */}
@@ -378,6 +396,16 @@ function PlayerRow({
             <div className="text-center text-[11px] font-medium text-slate-400">
                 {player.bye || '-'}
             </div>
+
+            {/* Drag Handle */}
+            {showOrderControls && (
+                <div
+                    {...dragHandleProps}
+                    className="flex justify-center p-1 text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing"
+                >
+                    <GripVertical className="w-4 h-4" />
+                </div>
+            )}
         </div>
     );
 }

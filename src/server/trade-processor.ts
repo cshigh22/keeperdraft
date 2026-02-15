@@ -248,6 +248,7 @@ export class TradeProcessor {
             currentOwnerName: updatedPick.currentOwner.owner?.name || 'Open Slot',
             originalOwnerId: updatedPick.originalOwnerId,
             isComplete: updatedPick.isComplete,
+            isKeeper: updatedPick.isKeeper,
           });
         } else if (asset.assetType === 'FUTURE_PICK' && asset.futurePickSeason && asset.futurePickRound) {
           const newOwnerId = asset.fromTeamId === trade.initiatorTeamId
@@ -307,6 +308,7 @@ export class TradeProcessor {
             currentOwnerName: pick.currentOwner.owner?.name || 'Open Slot',
             originalOwnerId: pick.originalOwnerId,
             isComplete: pick.isComplete,
+            isKeeper: pick.isKeeper,
           });
         }
       }

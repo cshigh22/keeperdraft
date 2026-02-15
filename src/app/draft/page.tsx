@@ -365,7 +365,7 @@ export default function DraftRoom() {
                 isPaused={state.isPaused}
                 draftType={state.draftType}
                 myTeamId={userTeam.id}
-                hideCompleted={true}
+                hideKeeperRounds={true}
               />
             </div>
 

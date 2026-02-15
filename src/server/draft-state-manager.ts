@@ -297,6 +297,7 @@ export class DraftStateManager {
         currentOwnerName: pick.currentOwner.owner?.name || 'Open Slot',
         originalOwnerId: pick.originalOwnerId,
         isComplete: pick.isComplete,
+        isKeeper: pick.isKeeper,
         selectedPlayer: player
           ? {
             id: player.id,
@@ -364,8 +365,8 @@ export class DraftStateManager {
     ]);
 
     const excludeIds = [
-      ...draftedPicks.map((p) => p.selectedPlayerId as string),
-      ...keeperRosters.map((k) => k.playerId),
+      ...draftedPicks.map((p) => p.selectedPlayerId).filter((id): id is string => !!id),
+      ...keeperRosters.map((k) => k.playerId).filter((id): id is string => !!id),
     ];
 
     const keeperMap = new Map<string, string>();
@@ -377,10 +378,12 @@ export class DraftStateManager {
     const players = await this.prisma.player.findMany({
       where: {
         id: { notIn: excludeIds },
-        status: 'ACTIVE',
       },
-      orderBy: { rank: 'asc' },
-      take: 500,
+      orderBy: [
+        { rank: 'asc' },
+        { fullName: 'asc' }
+      ],
+      take: 2000,
     });
 
     return players.map((player) => ({
@@ -443,7 +446,7 @@ export class DraftStateManager {
   }
 
   private async getTeamQueues(): Promise<Record<string, PlayerSummary[]>> {
-    const allQueues = await (this.prisma as any).draftQueue.findMany({
+    const allQueues = await this.prisma.draftQueue.findMany({
       where: {
         team: { leagueId: this.leagueId }
       },
@@ -478,12 +481,12 @@ export class DraftStateManager {
   }
 
   async updateQueue(teamId: string, playerIds: string[]): Promise<void> {
-    await (this.prisma as any).draftQueue.deleteMany({
+    await this.prisma.draftQueue.deleteMany({
       where: { teamId }
     });
 
     if (playerIds.length > 0) {
-      await (this.prisma as any).draftQueue.createMany({
+      await this.prisma.draftQueue.createMany({
         data: playerIds.map((playerId, index) => ({
           teamId,
           playerId,
@@ -492,13 +495,13 @@ export class DraftStateManager {
       });
     }
 
-    const updatedQueue = await (this.prisma as any).draftQueue.findMany({
+    const updatedQueue = await this.prisma.draftQueue.findMany({
       where: { teamId },
       include: { player: true },
       orderBy: { rank: 'asc' }
     });
 
-    const mappedQueue: PlayerSummary[] = updatedQueue.map((item: any) => ({
+    const mappedQueue: PlayerSummary[] = updatedQueue.map((item) => ({
       id: item.player.id,
       sleeperId: item.player.sleeperId,
       fullName: item.player.fullName,
@@ -577,85 +580,15 @@ export class DraftStateManager {
         throw new Error('No teams in league');
       }
 
-      // 2. PROCESS KEEPERS
-      const allKeepers = await this.prisma.playerRoster.findMany({
+      // 2. PROCESS KEEPERS (Simple check)
+      const allKeepersCount = await this.prisma.playerRoster.count({
         where: {
           leagueId: this.leagueId,
           isKeeper: true,
         },
       });
 
-      console.log(`[startDraft] Found ${allKeepers.length} keepers to process.`);
-
-      // Use a transaction for all keeper updates to ensure atomicity
-      await this.prisma.$transaction(async (tx) => {
-        // A. Process Cost Keepers First (Specific Rounds)
-        const costKeepers = allKeepers.filter(k => k.keeperRound !== null && k.keeperRound > 0);
-        for (const keeper of costKeepers) {
-          const pick = await tx.draftPick.findFirst({
-            where: {
-              leagueId: this.leagueId,
-              round: keeper.keeperRound!,
-              currentOwnerId: keeper.teamId,
-              isComplete: false,
-            },
-          });
-
-          if (pick) {
-            await tx.draftPick.update({
-              where: { id: pick.id },
-              data: {
-                isComplete: true,
-                selectedPlayerId: keeper.playerId,
-                selectedAt: new Date(),
-                isAutoPick: false,
-              },
-            });
-            console.log(`[startDraft] Cost keeper: Team ${keeper.teamId} -> Player ${keeper.playerId} (Round ${keeper.keeperRound})`);
-          } else {
-            console.warn(`[startDraft] No pick found for cost keeper (Team: ${keeper.teamId}, Round: ${keeper.keeperRound})`);
-          }
-        }
-
-        // B. Process No Cost Keepers (Earliest Available Rounds)
-        const noCostKeepers = allKeepers.filter(k => k.keeperRound === null || k.keeperRound === 0);
-        for (const keeper of noCostKeepers) {
-          const pick = await tx.draftPick.findFirst({
-            where: {
-              leagueId: this.leagueId,
-              currentOwnerId: keeper.teamId,
-              isComplete: false,
-            },
-            // Assign no-cost keepers to the next available pick for that team.
-            // This prevents them from defaulting into the final rounds.
-            orderBy: { overallPickNumber: 'asc' },
-          });
-
-          if (pick) {
-            await tx.draftPick.update({
-              where: { id: pick.id },
-              data: {
-                isComplete: true,
-                selectedPlayerId: keeper.playerId,
-                selectedAt: new Date(),
-                isAutoPick: false,
-              },
-            });
-
-            // Sync the assigned round back to roster
-            await tx.playerRoster.update({
-              where: {
-                teamId_playerId: {
-                  teamId: keeper.teamId,
-                  playerId: keeper.playerId
-                }
-              },
-              data: { keeperRound: pick.round }
-            });
-            console.log(`[startDraft] No-cost keeper: Team ${keeper.teamId} -> Player ${keeper.playerId} (Round ${pick.round})`);
-          }
-        }
-      });
+      console.log(`[startDraft] Found ${allKeepersCount} keepers on rosters. Starting draft for remaining spots.`);
 
       // 3. Find the first AVAILABLE pick after processing keepers
       const firstPick = await this.prisma.draftPick.findFirst({
@@ -935,6 +868,7 @@ export class DraftStateManager {
           selectedPlayerId: playerId,
           selectedAt: now,
           isComplete: true,
+          isKeeper: false,
         },
       });
 
@@ -1016,7 +950,7 @@ export class DraftStateManager {
     }
 
     // 5. Remove player from all queues
-    await (this.prisma as any).draftQueue.deleteMany({
+    await this.prisma.draftQueue.deleteMany({
       where: { playerId }
     });
 
@@ -1041,6 +975,7 @@ export class DraftStateManager {
         currentOwnerName: currentPick.currentOwner.owner?.name || 'Open Slot',
         originalOwnerId: currentPick.originalOwnerId,
         isComplete: true,
+        isKeeper: false,
         selectedPlayer: {
           id: player.id,
           sleeperId: player.sleeperId,
@@ -1478,7 +1413,7 @@ export class DraftStateManager {
 
     // Auto-pick logic:
     // 1. Check if team has anything in queue
-    const teamQueue = await (this.prisma as any).draftQueue.findFirst({
+    const teamQueue = await this.prisma.draftQueue.findFirst({
       where: { teamId: state.currentTeamId },
       orderBy: { rank: 'asc' },
       select: { playerId: true }

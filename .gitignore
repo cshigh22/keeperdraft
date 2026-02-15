@@ -43,7 +43,9 @@ next-env.d.ts
 # temporary debug scripts
 check_orphans.ts
 check-settings.ts
+check_prisma.ts
 test-keepers.ts
+test_types.ts
 verify_available_pool.ts
 scripts/*.ts
 !scripts/seed.ts # Example of a script you might want to keep

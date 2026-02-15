@@ -45,7 +45,7 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
         return { errors };
     }
 
-    // Calculate total rounds: roster spots minus keeper slots
+    // Calculate total rounds: roster spots minus keeper slots (keepers are excluded from the draft board)
     const totalRosterSize = qbCount + rbCount + wrCount + teCount + flexCount + superflexCount + kCount + defCount + benchCount;
     const totalRounds = Math.max(1, totalRosterSize - maxKeepers);
 
@@ -314,7 +314,7 @@ export async function updateLeague(leagueId: string, prevState: any, formData: F
             return { message: 'Unauthorized or League not found' };
         }
 
-        // Calculate total rounds
+        // Calculate total rounds: roster spots minus keeper slots
         const totalRosterSize = qbCount + rbCount + wrCount + teCount + flexCount + superflexCount + kCount + defCount + benchCount;
         const totalRounds = Math.max(1, totalRosterSize - maxKeepers);
 

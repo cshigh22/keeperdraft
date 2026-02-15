@@ -208,6 +208,7 @@ model DraftPick {
   selectedPlayerId  String?
   selectedAt        DateTime?
   isComplete        Boolean      @default(false)
+  isKeeper          Boolean      @default(false)
   isAutoPick        Boolean      @default(false)
   autoPickPlayerId  String?
   createdAt         DateTime     @default(now())

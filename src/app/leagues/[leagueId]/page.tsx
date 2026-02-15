@@ -82,19 +82,27 @@ export default async function LeagueDetailPage({
 
             {/* Actions */}
             <div className="flex flex-wrap gap-3 mb-8">
-                {draftStatus === "NOT_STARTED" && isCommissioner && (
+                {draftStatus === "NOT_STARTED" && (
                     <Link href={`/draft?leagueId=${league.id}`}>
                         <Button>
                             <Play className="mr-2 h-4 w-4" />
-                            Go to Draft Room
+                            {isCommissioner ? "Go to Draft Room" : "Enter Draft Room"}
                         </Button>
                     </Link>
                 )}
-                {draftStatus === "IN_PROGRESS" && (
+                {(draftStatus === "IN_PROGRESS" || draftStatus === "PAUSED") && (
                     <Link href={`/draft?leagueId=${league.id}`}>
                         <Button>
                             <Play className="mr-2 h-4 w-4" />
                             Join Draft
+                        </Button>
+                    </Link>
+                )}
+                {draftStatus === "COMPLETED" && (
+                    <Link href={`/draft?leagueId=${league.id}`}>
+                        <Button variant="outline">
+                            <Trophy className="mr-2 h-4 w-4" />
+                            View Draft Results
                         </Button>
                     </Link>
                 )}

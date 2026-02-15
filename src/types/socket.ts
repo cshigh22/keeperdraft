@@ -101,6 +101,7 @@ export interface DraftPickSummary {
   currentOwnerName: string;
   originalOwnerId: string;
   isComplete: boolean;
+  isKeeper: boolean;
   selectedPlayer?: PlayerSummary;
   selectedAt?: string;
 }

@@ -31,7 +31,7 @@ interface DraftBoardProps {
   isPaused: boolean;
   draftType: 'SNAKE' | 'LINEAR';
   myTeamId?: string;
-  hideCompleted?: boolean;
+  hideKeeperRounds?: boolean;
 }
 
 interface PickCellProps {
@@ -190,7 +190,7 @@ export function DraftBoard({
   isPaused,
   draftType,
   myTeamId,
-  hideCompleted = true,
+  hideKeeperRounds = true,
 }: DraftBoardProps) {
   // Build pick grid - maps each cell to a pick
   const fullPickMap = useMemo(() => {
@@ -202,7 +202,7 @@ export function DraftBoard({
   }, [teams]);
 
   const pickGrid = useMemo(() => {
-    const grid: (DraftPickSummary | null)[][] = [];
+    const grid: { round: number; picks: (DraftPickSummary | null)[] }[] = [];
 
     for (let round = 1; round <= totalRounds; round++) {
       const roundPicks: (DraftPickSummary | null)[] = [];
@@ -225,16 +225,12 @@ export function DraftBoard({
         roundPicks.push(pick);
       }
 
-      // Filter out completed picks (keepers) if requested
-      if (hideCompleted && roundPicks.every(p => p?.isComplete)) {
-        continue;
-      }
-
-      grid.push(roundPicks);
+      // Add every round to the grid to ensure history is always visible
+      grid.push({ round, picks: roundPicks });
     }
 
     return grid;
-  }, [fullPickMap, teams.length, totalRounds, draftType, hideCompleted]);
+  }, [fullPickMap, teams.length, totalRounds, draftType, hideKeeperRounds]);
 
   // Calculate which team has each pick
   const getTeamForPick = (overallPickNumber: number): TeamSummary => {
@@ -327,8 +323,7 @@ export function DraftBoard({
             </div>
 
             {/* Rounds */}
-            {pickGrid.map((roundPicks, roundIndex) => {
-              const round = roundIndex + 1;
+            {pickGrid.map(({ round, picks }, roundIndex) => {
               const isSnake = draftType === 'SNAKE';
               const isReversed = isSnake && round % 2 === 0;
 
@@ -350,7 +345,7 @@ export function DraftBoard({
                   </div>
 
                   {/* Picks in round */}
-                  {roundPicks.map((pick, teamIndex) => {
+                  {picks.map((pick, teamIndex) => {
                     const team = getTeamForPick(pick?.overallPickNumber || ((round - 1) * teams.length + teamIndex + 1));
                     const isTraded = pick
                       ? pick.originalOwnerId !== pick.currentOwnerId
