@@ -3,6 +3,7 @@
 import { prisma } from '@/lib/prisma';
 import { redirect } from 'next/navigation';
 import { auth } from '@/auth';
+import { CommissionerService } from '@/services/commissioner.service';
 
 interface CreateLeagueState {
     message?: string;
@@ -147,36 +148,9 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
                 orderBy: { draftPosition: 'asc' },
             });
 
-            const teamMap = new Map(allTeams.map(t => [t.draftPosition, t.id]));
-            const dbPicks = [];
-
-            for (let r = 1; r <= totalRounds; r++) {
-                for (let p = 1; p <= maxTeams; p++) {
-                    const overallPickNumber = (r - 1) * maxTeams + p;
-
-                    let ownerPos = p;
-                    if (draftType === 'SNAKE' && r % 2 === 0) {
-                        ownerPos = maxTeams - p + 1;
-                    }
-
-                    const ownerId = teamMap.get(ownerPos);
-                    if (!ownerId) throw new Error(`Could not find team for draft position ${ownerPos}`);
-
-                    dbPicks.push({
-                        leagueId: league.id,
-                        season: league.season,
-                        round: r,
-                        pickInRound: p,
-                        overallPickNumber,
-                        originalOwnerId: ownerId,
-                        currentOwnerId: ownerId,
-                        isComplete: false,
-                    });
-                }
-            }
-
-            await tx.draftPick.createMany({
-                data: dbPicks,
+            await CommissionerService.setDraftOrder({
+                leagueId: league.id,
+                teamOrderList: allTeams.map(t => t.id),
             });
 
             return league.id;
@@ -349,49 +323,16 @@ export async function updateLeague(leagueId: string, prevState: any, formData: F
 
             // If draft hasn't started, regenerate picks to reflect new settings/type
             if (league.draftState?.status === 'NOT_STARTED') {
-                // Delete existing picks
-                await tx.draftPick.deleteMany({
-                    where: { leagueId }
-                });
-
                 // Get teams to map positions
                 const allTeams = await tx.team.findMany({
                     where: { leagueId },
                     orderBy: { draftPosition: 'asc' },
                 });
 
-                const teamMap = new Map(allTeams.map(t => [t.draftPosition, t.id]));
-                const maxTeams = allTeams.length;
-                const dbPicks = [];
-
-                for (let r = 1; r <= totalRounds; r++) {
-                    for (let p = 1; p <= maxTeams; p++) {
-                        const overallPickNumber = (r - 1) * maxTeams + p;
-
-                        let ownerPos = p;
-                        if (draftType === 'SNAKE' && r % 2 === 0) {
-                            ownerPos = maxTeams - p + 1;
-                        }
-
-                        const ownerId = teamMap.get(ownerPos);
-                        if (!ownerId) continue; // Should not happen
-
-                        dbPicks.push({
-                            leagueId: league.id,
-                            season: league.season,
-                            round: r,
-                            pickInRound: p,
-                            overallPickNumber,
-                            originalOwnerId: ownerId,
-                            currentOwnerId: ownerId,
-                            isComplete: false,
-                        });
-                    }
-                }
-
-                if (dbPicks.length > 0) {
-                    await tx.draftPick.createMany({
-                        data: dbPicks,
+                if (allTeams.length > 0) {
+                    await CommissionerService.setDraftOrder({
+                        leagueId,
+                        teamOrderList: allTeams.map(t => t.id)
                     });
                 }
             }

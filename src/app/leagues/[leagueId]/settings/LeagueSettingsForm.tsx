@@ -15,6 +15,8 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { useRouter } from 'next/navigation';
+import { DraftOrderSettings } from './DraftOrderSettings';
+import { DraftBoardEditor } from './DraftBoardEditor';
 
 const ROSTER_POSITIONS = [
     { id: 'qbCount', label: 'QB' },
@@ -52,108 +54,123 @@ export default function LeagueSettingsForm({ league }: { league: any }) {
     };
 
     return (
-        <Card>
-            <CardHeader>
-                <CardTitle>Edit League Settings</CardTitle>
-                <CardDescription>
-                    Update your league configuration. Some settings are locked once the draft begins.
-                </CardDescription>
-            </CardHeader>
-            <CardContent>
-                <form action={handleSubmit} className="space-y-8">
-                    {statusMessage && (
-                        <div className={`p-3 rounded-md text-sm ${statusMessage.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
-                            }`}>
-                            {statusMessage.text}
-                        </div>
-                    )}
-
-                    {/* General Settings */}
-                    <div className="space-y-4">
-                        <h3 className="text-lg font-medium">General Settings</h3>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                                <Label htmlFor="name">League Name</Label>
-                                <Input id="name" name="name" defaultValue={league.name} required />
+        <div className="space-y-8">
+            <Card>
+                <CardHeader>
+                    <CardTitle>Edit League Settings</CardTitle>
+                    <CardDescription>
+                        Update your league configuration. Some settings are locked once the draft begins.
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <form action={handleSubmit} className="space-y-8">
+                        {statusMessage && (
+                            <div className={`p-3 rounded-md text-sm ${statusMessage.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
+                                }`}>
+                                {statusMessage.text}
                             </div>
+                        )}
 
-                            <div className="space-y-2">
-                                <Label htmlFor="draftType">Draft Type</Label>
-                                <Select name="draftType" defaultValue={settings.draftType} disabled={isLocked}>
-                                    <SelectTrigger>
-                                        <SelectValue placeholder="Select draft type" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        <SelectItem value="SNAKE">Snake</SelectItem>
-                                        <SelectItem value="LINEAR">Linear</SelectItem>
-                                    </SelectContent>
-                                </Select>
-                            </div>
+                        {/* General Settings */}
+                        <div className="space-y-4">
+                            <h3 className="text-lg font-medium">General Settings</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <Label htmlFor="name">League Name</Label>
+                                    <Input id="name" name="name" defaultValue={league.name} required />
+                                </div>
 
-                            <div className="space-y-2">
-                                <Label htmlFor="maxKeepers">Max Keepers per Team</Label>
-                                <Input
-                                    id="maxKeepers"
-                                    name="maxKeepers"
-                                    type="number"
-                                    min="0"
-                                    defaultValue={settings.maxKeepers}
-                                    disabled={isLocked}
-                                />
-                            </div>
+                                <div className="space-y-2">
+                                    <Label htmlFor="draftType">Draft Type</Label>
+                                    <Select name="draftType" defaultValue={settings.draftType} disabled={isLocked}>
+                                        <SelectTrigger>
+                                            <SelectValue placeholder="Select draft type" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="SNAKE">Snake</SelectItem>
+                                            <SelectItem value="LINEAR">Linear</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
 
-                            <div className="space-y-2">
-                                <Label htmlFor="timerDurationSeconds">Pick Timer (seconds)</Label>
-                                <Input
-                                    id="timerDurationSeconds"
-                                    name="timerDurationSeconds"
-                                    type="number"
-                                    min="10"
-                                    step="5"
-                                    defaultValue={settings.timerDurationSeconds}
-                                />
-                            </div>
-                        </div>
-                    </div>
-
-                    <Separator />
-
-                    {/* Roster Settings */}
-                    <div className="space-y-4">
-                        <h3 className="text-lg font-medium">Roster Settings</h3>
-                        <p className="text-sm text-muted-foreground mb-4">
-                            Define the starting lineup and bench size.
-                            {isLocked && <span className="text-red-500 block mt-1">Locked because draft has started.</span>}
-                        </p>
-
-                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-                            {ROSTER_POSITIONS.map((pos) => (
-                                <div key={pos.id} className="space-y-2">
-                                    <Label htmlFor={pos.id}>{pos.label}</Label>
+                                <div className="space-y-2">
+                                    <Label htmlFor="maxKeepers">Max Keepers per Team</Label>
                                     <Input
-                                        id={pos.id}
-                                        name={pos.id}
+                                        id="maxKeepers"
+                                        name="maxKeepers"
                                         type="number"
                                         min="0"
-                                        defaultValue={settings[pos.id] || 0}
-                                        className="w-full"
+                                        defaultValue={settings.maxKeepers}
                                         disabled={isLocked}
                                     />
                                 </div>
-                            ))}
-                        </div>
-                    </div>
 
-                    <div className="flex justify-end gap-3 pt-4">
-                        <Button type="button" variant="outline" onClick={() => router.back()}>
-                            Cancel
-                        </Button>
-                        <Button type="submit" disabled={isPending}>
-                            {isPending ? 'Saving...' : 'Save Changes'}
-                        </Button>
-                    </div>
-                </form>
-            </CardContent>
-        </Card>
+                                <div className="space-y-2">
+                                    <Label htmlFor="timerDurationSeconds">Pick Timer (seconds)</Label>
+                                    <Input
+                                        id="timerDurationSeconds"
+                                        name="timerDurationSeconds"
+                                        type="number"
+                                        min="10"
+                                        step="5"
+                                        defaultValue={settings.timerDurationSeconds}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        <Separator />
+
+                        {/* Roster Settings */}
+                        <div className="space-y-4">
+                            <h3 className="text-lg font-medium">Roster Settings</h3>
+                            <p className="text-sm text-muted-foreground mb-4">
+                                Define the starting lineup and bench size.
+                                {isLocked && <span className="text-red-500 block mt-1">Locked because draft has started.</span>}
+                            </p>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                                {ROSTER_POSITIONS.map((pos) => (
+                                    <div key={pos.id} className="space-y-2">
+                                        <Label htmlFor={pos.id}>{pos.label}</Label>
+                                        <Input
+                                            id={pos.id}
+                                            name={pos.id}
+                                            type="number"
+                                            min="0"
+                                            defaultValue={settings[pos.id] || 0}
+                                            className="w-full"
+                                            disabled={isLocked}
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="flex justify-end gap-3 pt-4">
+                            <Button type="button" variant="outline" onClick={() => router.back()}>
+                                Cancel
+                            </Button>
+                            <Button type="submit" disabled={isPending}>
+                                {isPending ? 'Saving...' : 'Save Changes'}
+                            </Button>
+                        </div>
+                    </form>
+                </CardContent>
+            </Card>
+
+            <DraftOrderSettings
+                leagueId={league.id}
+                teams={league.teams || []}
+                isLocked={isLocked}
+            />
+
+            <DraftBoardEditor
+                leagueId={league.id}
+                picks={league.draftPicks || []}
+                teams={league.teams || []}
+                isLocked={isLocked}
+            />
+        </div>
     );
 }

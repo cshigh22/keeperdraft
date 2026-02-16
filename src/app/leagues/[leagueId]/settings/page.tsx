@@ -20,6 +20,26 @@ export default async function LeagueSettingsPage({
         include: {
             draftSettings: true,
             draftState: true,
+            draftPicks: {
+                include: {
+                    currentOwner: true,
+                },
+                orderBy: {
+                    overallPickNumber: 'asc',
+                },
+            },
+            teams: {
+                include: {
+                    owner: {
+                        select: {
+                            name: true
+                        }
+                    }
+                },
+                orderBy: {
+                    draftPosition: 'asc'
+                }
+            }
         },
     });
 
@@ -33,7 +53,7 @@ export default async function LeagueSettingsPage({
 
     return (
         <div className="container mx-auto py-10 px-4">
-            <div className="max-w-2xl mx-auto">
+            <div className="max-w-5xl mx-auto">
                 <div className="flex items-center gap-4 mb-6">
                     <Link href={`/leagues/${league.id}`} className="text-muted-foreground hover:text-foreground transition-colors">
                         <ArrowLeft className="h-5 w-5" />

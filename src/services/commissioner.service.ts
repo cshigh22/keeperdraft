@@ -120,50 +120,66 @@ export const CommissionerService = {
 
     // Update team positions and generate picks in a transaction
     const result = await prisma.$transaction(async (tx) => {
-      // Update each team's draft position
-      const updatedTeams = await Promise.all(
-        teamOrderList.map(async (teamId, index) => {
-          const team = await tx.team.update({
-            where: { id: teamId },
-            data: { draftPosition: index + 1 },
-            include: { owner: { select: { name: true } } },
-          });
-          return {
-            id: team.id,
-            name: team.name,
-            draftPosition: index + 1,
-            ownerName: team.owner?.name ?? 'No Owner',
-          };
-        })
-      );
+      // 1. Capture current ownership state for traded picks
+      // This allows trades to "follow the team" when the draft order changes
+      const currentPicks = await tx.draftPick.findMany({
+        where: { leagueId },
+        select: {
+          round: true,
+          originalOwnerId: true,
+          currentOwnerId: true,
+        },
+      });
 
-      // Delete existing draft picks (if draft hasn't started)
-      if (!league.draftState || league.draftState.status === 'NOT_STARTED') {
-        await tx.draftPick.deleteMany({
-          where: { leagueId },
+      // Map: "round:originalOwnerId" -> currentOwnerId
+      // Only store if the pick was traded (current != original)
+      const tradeMap = new Map<string, string>();
+      for (const pick of currentPicks) {
+        if (pick.currentOwnerId !== pick.originalOwnerId) {
+          tradeMap.set(`${pick.round}:${pick.originalOwnerId}`, pick.currentOwnerId);
+        }
+      }
+
+      // 2. Clear all draft positions first to avoid unique constraint violations
+      // (leagueId, draftPosition) is unique, so we can't swap directly without nulling first
+      await tx.team.updateMany({
+        where: { leagueId },
+        data: { draftPosition: null },
+      });
+
+      // 3. Update each team's draft position
+      const updatedTeams = [];
+      for (let i = 0; i < teamOrderList.length; i++) {
+        const teamId = teamOrderList[i];
+        if (!teamId) continue;
+
+        const team = await tx.team.update({
+          where: { id: teamId },
+          data: { draftPosition: i + 1 },
+          include: { owner: { select: { name: true } } },
         });
 
-        // Generate new draft picks
+        updatedTeams.push({
+          id: team.id,
+          name: team.name,
+          draftPosition: i + 1,
+          ownerName: team.owner?.name ?? 'No Owner',
+        });
+      }
+
+      // 4. Update or Generate draft picks (if draft hasn't started)
+      if (!league.draftState || league.draftState.status === 'NOT_STARTED') {
         const settings = league.draftSettings;
         const totalRounds = settings?.totalRounds || 15;
         const draftType = settings?.draftType || 'SNAKE';
-        const season = new Date().getFullYear();
+        const season = league.season;
 
         if (totalRounds < 1) {
           throw new Error('Total rounds must be at least 1');
         }
 
-        const picks: {
-          leagueId: string;
-          season: number;
-          round: number;
-          pickInRound: number;
-          overallPickNumber: number;
-          originalOwnerId: string;
-          currentOwnerId: string;
-        }[] = [];
-
-        let overallPick = 1;
+        // We'll update picks round by round
+        let picksUpdated = 0;
 
         for (let round = 1; round <= totalRounds; round++) {
           // Determine order for this round based on draft type
@@ -171,18 +187,14 @@ export const CommissionerService = {
 
           switch (draftType) {
             case 'SNAKE':
-              // Even rounds are reversed
               orderForRound = round % 2 === 0
                 ? [...teamOrderList].reverse()
                 : teamOrderList;
               break;
             case 'LINEAR':
-              // Same order every round
               orderForRound = teamOrderList;
               break;
             case 'THIRD_ROUND_REVERSAL':
-              // 1-10, 10-1, 10-1, 1-10, 1-10, 10-1, 10-1, ...
-              // Round 1: normal, Round 2: reversed, Round 3: reversed, Round 4: normal, etc.
               const cycle = Math.floor((round - 1) / 2) % 2;
               const isReversedRound = round > 1 && (round === 2 || round === 3 || cycle === 1);
               orderForRound = isReversedRound
@@ -197,24 +209,57 @@ export const CommissionerService = {
             const teamId = orderForRound[pickInRound - 1];
             if (!teamId) continue;
 
-            picks.push({
-              leagueId,
-              season,
-              round,
-              pickInRound,
-              overallPickNumber: overallPick,
-              originalOwnerId: teamId,
-              currentOwnerId: teamId,
+            const overallPickNumber = (round - 1) * teamOrderList.length + pickInRound;
+
+            // Check if this team's pick in this round was previously traded
+            // The trade follows the team
+            const currentOwnerId = tradeMap.get(`${round}:${teamId}`) || teamId;
+
+            // Use upsert to avoid duplicate key errors if some picks already exist
+            // but we need to change their properties
+            await tx.draftPick.upsert({
+              where: {
+                leagueId_season_round_pickInRound: {
+                  leagueId,
+                  season,
+                  round,
+                  pickInRound,
+                },
+              },
+              update: {
+                originalOwnerId: teamId,
+                currentOwnerId: currentOwnerId,
+                overallPickNumber: overallPickNumber,
+              },
+              create: {
+                leagueId,
+                season,
+                round,
+                pickInRound,
+                overallPickNumber: overallPickNumber,
+                originalOwnerId: teamId,
+                currentOwnerId: currentOwnerId,
+              },
             });
-            overallPick++;
+            picksUpdated++;
           }
         }
 
-        await tx.draftPick.createMany({ data: picks });
+        // Clean up any extra picks if the number of teams or rounds decreased
+        await tx.draftPick.deleteMany({
+          where: {
+            leagueId,
+            season,
+            OR: [
+              { round: { gt: totalRounds } },
+              { pickInRound: { gt: teamOrderList.length } },
+            ],
+          },
+        });
 
         return {
           teams: updatedTeams,
-          picksGenerated: picks.length,
+          picksGenerated: picksUpdated,
         };
       }
 
@@ -762,6 +807,52 @@ export const CommissionerService = {
       where: { leagueId },
       orderBy: { createdAt: 'desc' },
       take: limit,
+    });
+  },
+
+  /**
+   * Manually assign pick owner (Commissioner God Mode)
+   */
+  async manuallyAssignPickOwner(leagueId: string, pickId: string, newOwnerId: string): Promise<void> {
+    const pick = await prisma.draftPick.findUnique({
+      where: { id: pickId },
+      include: { currentOwner: true }
+    });
+
+    if (!pick || pick.leagueId !== leagueId) {
+      throw new Error('Pick not found in this league');
+    }
+
+    if (pick.isComplete) {
+      throw new Error('Cannot change ownership of a pick that has already been made');
+    }
+
+    const team = await prisma.team.findUnique({
+      where: { id: newOwnerId }
+    });
+
+    if (!team || team.leagueId !== leagueId) {
+      throw new Error('Target team not found in this league');
+    }
+
+    await prisma.draftPick.update({
+      where: { id: pickId },
+      data: { currentOwnerId: newOwnerId }
+    });
+
+    await prisma.draftActivityLog.create({
+      data: {
+        leagueId,
+        activityType: 'ORDER_UPDATED',
+        description: `Commissioner manually assigned pick ${pick.round}.${pick.pickInRound} to ${team.name}`,
+        metadata: {
+          pickId,
+          oldOwnerId: pick.currentOwnerId,
+          newOwnerId: newOwnerId,
+          round: pick.round,
+          pickInRound: pick.pickInRound
+        }
+      }
     });
   },
 

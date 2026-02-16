@@ -22,6 +22,36 @@ export async function updateDraftSettingsAction(input: any) {
     }
 }
 
+export async function setDraftOrderAction(leagueId: string, teamOrderList: string[]) {
+    try {
+        const result = await CommissionerService.setDraftOrder({ leagueId, teamOrderList });
+        return { success: true, data: result };
+    } catch (error: any) {
+        console.error('Failed to set draft order:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+export async function randomizeDraftOrderAction(leagueId: string) {
+    try {
+        const result = await CommissionerService.randomizeDraftOrder(leagueId);
+        return { success: true, data: result };
+    } catch (error: any) {
+        console.error('Failed to randomize draft order:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+export async function manuallyAssignPickOwnerAction(leagueId: string, pickId: string, newOwnerId: string) {
+    try {
+        await CommissionerService.manuallyAssignPickOwner(leagueId, pickId, newOwnerId);
+        return { success: true };
+    } catch (error: any) {
+        console.error('Failed to manually assign pick owner:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 export async function getDraftSettingsAction(leagueId: string) {
     try {
         const settings = await CommissionerService.getDraftSettings(leagueId);
