@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Plus } from "lucide-react";
 
+export const dynamic = "force-dynamic";
+
 export default async function LeaguesPage() {
     const session = await auth();
 

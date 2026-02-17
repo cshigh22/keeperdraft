@@ -854,6 +854,12 @@ export class DraftStateManager {
       throw new Error('Player not found');
     }
 
+    // Double check positional requirements (server-side validation)
+    const restrictedPositions = await this.getRestrictedPositionsForTeam(teamId);
+    if (restrictedPositions.includes(player.position)) {
+      throw new Error(`Positional limit reached for ${player.position}`);
+    }
+
     // Stop the timer
     this.stopTimer();
 
@@ -1412,28 +1418,41 @@ export class DraftStateManager {
     });
 
     // Auto-pick logic:
-    // 1. Check if team has anything in queue
-    const teamQueue = await this.prisma.draftQueue.findFirst({
+    const restrictedPositions = await this.getRestrictedPositionsForTeam(state.currentTeamId);
+
+    // 1. Check if team has anything in queue that is available AND satisfies positional requirements
+    const teamQueue = await this.prisma.draftQueue.findMany({
       where: { teamId: state.currentTeamId },
       orderBy: { rank: 'asc' },
-      select: { playerId: true }
+      include: { player: true }
     });
 
-    if (teamQueue) {
-      const isAvailable = await this.isPlayerAvailable(teamQueue.playerId);
-      if (isAvailable) {
-        console.log(`[TimerExpired] Drafting top queued player ${teamQueue.playerId} for team ${state.currentTeamId}`);
-        await this.makePick(state.currentTeamId, teamQueue.playerId);
+    for (const queueItem of teamQueue) {
+      const isAvailable = await this.isPlayerAvailable(queueItem.playerId);
+      const isRestricted = restrictedPositions.includes(queueItem.player.position);
+
+      if (isAvailable && !isRestricted) {
+        console.log(`[TimerExpired] Drafting top valid queued player ${queueItem.playerId} for team ${state.currentTeamId}`);
+        await this.makePick(state.currentTeamId, queueItem.playerId);
         return;
       }
     }
 
-    // 2. Fallback to best available player
+    // 2. Fallback to best available player that satisfies positional requirements
     const availablePlayers = await this.getAvailablePlayers();
-    const bestPlayer = availablePlayers[0];
-    if (bestPlayer) {
-      console.log(`[TimerExpired] No queue found. Drafting best available player ${bestPlayer.fullName} for team ${state.currentTeamId}`);
-      await this.makePick(state.currentTeamId, bestPlayer.id);
+    const validPlayer = availablePlayers.find(p => !restrictedPositions.includes(p.position));
+
+    if (validPlayer) {
+      console.log(`[TimerExpired] No queue found. Drafting best valid player ${validPlayer.fullName} for team ${state.currentTeamId}`);
+      await this.makePick(state.currentTeamId, validPlayer.id);
+    } else {
+      // Last resort: if no valid player is found (should be rare), just take the best available
+      // to avoid stalling the draft, but this shouldn't happen with correct settings
+      const bestPlayer = availablePlayers[0];
+      if (bestPlayer) {
+        console.log(`[TimerExpired] No valid position player found. Drafting best available player ${bestPlayer.fullName} for team ${state.currentTeamId}`);
+        await this.makePick(state.currentTeamId, bestPlayer.id);
+      }
     }
   }
 
@@ -1463,6 +1482,105 @@ export class DraftStateManager {
     });
 
     return !kept;
+  }
+
+  private async getRestrictedPositionsForTeam(teamId: string): Promise<string[]> {
+    const settings = await this.prisma.draftSettings.findUnique({
+      where: { leagueId: this.leagueId },
+    });
+
+    if (!settings) return [];
+
+    const roster = await this.prisma.playerRoster.findMany({
+      where: {
+        leagueId: this.leagueId,
+        teamId: teamId,
+      },
+      include: { player: { select: { position: true } } },
+    });
+
+    const counts: Record<string, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
+    roster.forEach((r) => {
+      const pos = r.player.position as string;
+      const targetPos = pos === 'DST' ? 'DEF' : pos;
+      if (counts[targetPos] !== undefined) {
+        counts[targetPos]++;
+      }
+    });
+
+    let remQB = settings.qbCount || 0;
+    let remRB = settings.rbCount || 0;
+    let remWR = settings.wrCount || 0;
+    let remTE = settings.teCount || 0;
+    let remK = settings.kCount || 0;
+    let remDEF = settings.defCount || 0;
+    let remFLEX = settings.flexCount || 0;
+    let remSFLEX = settings.superflexCount || 0;
+
+    // 1. Primary slots
+    let leftQB = Math.max(0, (counts.QB || 0) - remQB);
+    remQB = Math.max(0, remQB - (counts.QB || 0));
+
+    let leftRB = Math.max(0, (counts.RB || 0) - remRB);
+    remRB = Math.max(0, remRB - (counts.RB || 0));
+
+    let leftWR = Math.max(0, (counts.WR || 0) - remWR);
+    remWR = Math.max(0, remWR - (counts.WR || 0));
+
+    let leftTE = Math.max(0, (counts.TE || 0) - remTE);
+    remTE = Math.max(0, remTE - (counts.TE || 0));
+
+    let leftK = Math.max(0, (counts.K || 0) - remK);
+    remK = Math.max(0, remK - (counts.K || 0));
+
+    let leftDEF = Math.max(0, (counts.DEF || 0) - remDEF);
+    remDEF = Math.max(0, remDEF - (counts.DEF || 0));
+
+    // 2. FLEX (RB/WR/TE)
+    const fillingFLEX = Math.min(remFLEX, leftRB + leftWR + leftTE);
+    let fNeed = fillingFLEX;
+    let uRB = Math.min(fNeed, leftRB);
+    leftRB -= uRB;
+    fNeed -= uRB;
+    let uWR = Math.min(fNeed, leftWR);
+    leftWR -= uWR;
+    fNeed -= uWR;
+    let uTE = Math.min(fNeed, leftTE);
+    leftTE -= uTE;
+    remFLEX -= fillingFLEX;
+
+    // 3. SFLEX (QB/RB/WR/TE)
+    const fillingSFLEX = Math.min(remSFLEX, leftQB + leftRB + leftWR + leftTE);
+    let sfNeed = fillingSFLEX;
+    let sQB = Math.min(sfNeed, leftQB);
+    leftQB -= sQB;
+    sfNeed -= sQB;
+    let sRB = Math.min(sfNeed, leftRB);
+    leftRB -= sRB;
+    sfNeed -= sRB;
+    let sWR = Math.min(sfNeed, leftWR);
+    leftWR -= sWR;
+    sfNeed -= sWR;
+    let sTE = Math.min(sfNeed, leftTE);
+    leftTE -= sTE;
+    remSFLEX -= fillingSFLEX;
+
+    const totalEmptyStarters = remQB + remRB + remWR + remTE + remK + remDEF + remFLEX + remSFLEX;
+    const currentBenchCount = leftQB + leftRB + leftWR + leftTE + leftK + leftDEF;
+    const benchLimit = settings.benchCount || 0;
+
+    if (totalEmptyStarters === 0) return [];
+    if (currentBenchCount < benchLimit) return [];
+
+    const restricted = [];
+    if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
+    if (remRB === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('RB');
+    if (remWR === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('WR');
+    if (remTE === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('TE');
+    if (remK === 0) restricted.push('K');
+    if (remDEF === 0) restricted.push('DEF');
+
+    return restricted;
   }
 
   private async calculateNextPick(

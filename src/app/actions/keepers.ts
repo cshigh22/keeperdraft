@@ -1,6 +1,7 @@
 'use server';
 
 import { KeeperService, KeeperSelection } from '@/services/keeper.service';
+import { revalidateLeague } from './league';
 
 // Assuming mock session or actual session
 // If using mock session from client, we need to pass userId. 
@@ -24,6 +25,7 @@ export async function getPotentialKeepers(teamId: string, leagueId: string) {
 export async function saveKeepers(teamId: string, leagueId: string, selections: KeeperSelection[]) {
     try {
         await keeperService.saveKeepers(teamId, leagueId, selections);
+        await revalidateLeague(leagueId);
         return { success: true };
     } catch (error: any) {
         console.error('Failed to save keepers:', error);

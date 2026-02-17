@@ -180,21 +180,19 @@ export async function seedPlayersFromSleeper(): Promise<SeedResult> {
 
     console.log(`Fetched ${result.totalPlayers} players from Sleeper`);
 
-    // Filter to fantasy-relevant positions
-    const relevantPositions = new Set(['QB', 'RB', 'WR', 'TE', 'K', 'DEF']);
-    
     // Process in batches to avoid memory issues
-    const BATCH_SIZE = 500;
-    
+    const BATCH_SIZE = 1000;
+
     for (let i = 0; i < playerEntries.length; i += BATCH_SIZE) {
       const batch = playerEntries.slice(i, i + BATCH_SIZE);
-      
-      const playersToUpsert = batch
+
+      const playersToProcess = batch
         .filter(([_, player]) => {
-          // Only include fantasy-relevant positions with valid data
+          // Only include players with valid data and supported positions
+          // Teams (DEF) are identified by position 'DEF' in Sleeper
           return (
             player.position &&
-            relevantPositions.has(player.position) &&
+            ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'].includes(player.position) &&
             player.full_name &&
             player.player_id
           );
@@ -210,28 +208,23 @@ export async function seedPlayersFromSleeper(): Promise<SeedResult> {
           yearsExp: player.years_exp || null,
           status: mapStatus(player.status),
           injuryStatus: player.injury_status || null,
-          rank: player.search_rank || null,
+          rank: (player.search_rank !== null && player.search_rank !== undefined && player.search_rank > 0)
+            ? player.search_rank
+            : 9999,
         }));
 
-      // Use upsert for each player
-      for (const playerData of playersToUpsert) {
+      // Use a custom upsert strategy since createMany doesn't support it directly
+      // For each player, either create or update
+      for (const playerData of playersToProcess) {
         try {
-          const existing = await prisma.player.findUnique({
+          await prisma.player.upsert({
             where: { sleeperId: playerData.sleeperId },
+            update: playerData,
+            create: playerData,
           });
-
-          if (existing) {
-            await prisma.player.update({
-              where: { sleeperId: playerData.sleeperId },
-              data: playerData,
-            });
-            result.updatedPlayers++;
-          } else {
-            await prisma.player.create({
-              data: playerData,
-            });
-            result.insertedPlayers++;
-          }
+          // We can't easily distinguish inserted vs updated without another query, 
+          // but we can increment total processed
+          result.updatedPlayers++;
         } catch (error) {
           result.errors.push(`Error processing ${playerData.fullName}: ${error}`);
           result.skippedPlayers++;
@@ -260,7 +253,7 @@ export async function updatePlayerRankings(): Promise<{ updated: number; errors:
 
   try {
     const sleeperPlayers = await SleeperAPI.fetchAllPlayers();
-    
+
     for (const [sleeperId, player] of Object.entries(sleeperPlayers)) {
       try {
         await prisma.player.updateMany({

@@ -9,6 +9,8 @@ import { Separator } from "@/components/ui/separator";
 import { Users, Settings, Trophy, Play, ArrowLeft, Copy } from "lucide-react";
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
 
+export const dynamic = "force-dynamic";
+
 export default async function LeagueDetailPage({
     params,
 }: {

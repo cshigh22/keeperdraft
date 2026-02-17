@@ -41,8 +41,10 @@ import {
   Loader2,
   Trophy,
   Users,
+  ArrowLeft,
 } from 'lucide-react';
 import type { TradeOfferedPayload } from '@/types/socket';
+import { revalidateLeague } from '@/app/actions/league';
 
 // ============================================================================
 // MOCK SESSION (Replace with real auth in production)
@@ -151,7 +153,15 @@ export default function DraftRoom() {
           <div className="flex items-center justify-between">
             {/* Left - Logo and status */}
             <div className="flex items-center gap-4">
-              <h1 className="text-xl font-bold">KeeperDraft</h1>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="p-0 hover:bg-transparent"
+                onClick={() => window.location.href = `/leagues/${leagueId}`}
+              >
+                <ArrowLeft className="w-5 h-5 mr-1" />
+                <h1 className="text-xl font-bold">KeeperDraft</h1>
+              </Button>
               <Badge
                 variant={state.isConnected ? 'default' : 'destructive'}
                 className="gap-1"
@@ -261,8 +271,9 @@ export default function DraftRoom() {
                         </Button>
                         <Button
                           variant="destructive"
-                          onClick={() => {
+                          onClick={async () => {
                             actions.resetDraft();
+                            await revalidateLeague(leagueId);
                             setShowResetConfirm(false);
                           }}
                         >
@@ -383,6 +394,9 @@ export default function DraftRoom() {
                 isLoading={!state.isConnected}
                 teamQueue={state.teamQueues[userTeam.id] || []}
                 onUpdateQueue={(playerIds) => actions.updateQueue(userTeam.id, playerIds)}
+                rosterSettings={state.rosterSettings}
+                teamRosters={state.teamRosters}
+                currentTeamId={state.currentTeamId}
               />
             </div>
 

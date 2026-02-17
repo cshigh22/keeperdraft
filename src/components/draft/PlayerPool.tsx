@@ -29,9 +29,95 @@ interface PlayerPoolProps {
     isLoading?: boolean;
     teamQueue: PlayerSummary[];
     onUpdateQueue: (playerIds: string[]) => void;
+    rosterSettings?: any;
+    teamRosters?: Record<string, any[]>;
+    currentTeamId?: string | null;
 }
 
 type PositionFilter = 'ALL' | 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DST';
+
+// ============================================================================
+// POSITIONAL REQUIREMENT LOGIC
+// ============================================================================
+
+function getRestrictedPositions(roster: any[] = [], settings: any = {}) {
+    if (!settings) return [];
+
+    const counts: Record<string, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
+    roster.forEach(p => {
+        const pos = p.position as string;
+        const targetPos = pos === 'DST' ? 'DEF' : pos;
+        if (counts[targetPos] !== undefined) {
+            counts[targetPos] = (counts[targetPos] || 0) + 1;
+        }
+    });
+
+    let remQB = settings.qbCount || 0;
+    let remRB = settings.rbCount || 0;
+    let remWR = settings.wrCount || 0;
+    let remTE = settings.teCount || 0;
+    let remK = settings.kCount || 0;
+    let remDEF = settings.defCount || 0;
+    let remFLEX = settings.flexCount || 0;
+    let remSFLEX = settings.superflexCount || 0;
+
+    // 1. Primary slots
+    let leftQB = Math.max(0, (counts.QB || 0) - remQB);
+    remQB = Math.max(0, remQB - (counts.QB || 0));
+
+    let leftRB = Math.max(0, (counts.RB || 0) - remRB);
+    remRB = Math.max(0, remRB - (counts.RB || 0));
+
+    let leftWR = Math.max(0, (counts.WR || 0) - remWR);
+    remWR = Math.max(0, remWR - (counts.WR || 0));
+
+    let leftTE = Math.max(0, (counts.TE || 0) - remTE);
+    remTE = Math.max(0, remTE - (counts.TE || 0));
+
+    let leftK = Math.max(0, (counts.K || 0) - remK);
+    remK = Math.max(0, remK - (counts.K || 0));
+
+    let leftDEF = Math.max(0, (counts.DEF || 0) - remDEF);
+    remDEF = Math.max(0, remDEF - (counts.DEF || 0));
+
+    // 2. FLEX (RB/WR/TE)
+    const fillingFLEX = Math.min(remFLEX, leftRB + leftWR + leftTE);
+    let fNeed = fillingFLEX;
+    let uRB = Math.min(fNeed, leftRB); leftRB -= uRB; fNeed -= uRB;
+    let uWR = Math.min(fNeed, leftWR); leftWR -= uWR; fNeed -= uWR;
+    let uTE = Math.min(fNeed, leftTE); leftTE -= uTE;
+    remFLEX -= fillingFLEX;
+
+    // 3. SFLEX (QB/RB/WR/TE)
+    const fillingSFLEX = Math.min(remSFLEX, leftQB + leftRB + leftWR + leftTE);
+    let sfNeed = fillingSFLEX;
+    let sQB = Math.min(sfNeed, leftQB); leftQB -= sQB; sfNeed -= sQB;
+    let sRB = Math.min(sfNeed, leftRB); leftRB -= sRB; sfNeed -= sRB;
+    let sWR = Math.min(sfNeed, leftWR); leftWR -= sWR; sfNeed -= sWR;
+    let sTE = Math.min(sfNeed, leftTE); leftTE -= sTE;
+    remSFLEX -= fillingSFLEX;
+
+    const totalEmptyStarters = remQB + remRB + remWR + remTE + remK + remDEF + remFLEX + remSFLEX;
+    const currentBenchCount = leftQB + leftRB + leftWR + leftTE + leftK + leftDEF;
+    const benchLimit = settings.benchCount || 0;
+
+    // If no starters left, we are in "Bench mode" where positions are NOT restricted
+    if (totalEmptyStarters === 0) return [];
+
+    // Rule: If bench is under the limit, you can draft any position.
+    // If bench is full, you MUST fulfill the remaining starting positions.
+    if (currentBenchCount < benchLimit) return [];
+
+    const restricted = [];
+    if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
+    if (remRB === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('RB');
+    if (remWR === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('WR');
+    if (remTE === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('TE');
+    if (remK === 0) restricted.push('K');
+    if (remDEF === 0) restricted.push('DEF');
+
+    return restricted;
+}
 
 // ============================================================================
 // POSITION STYLE HELPERS
@@ -58,11 +144,28 @@ export function PlayerPool({
     teamQueue,
     onUpdateQueue,
     isLoading = false,
+    rosterSettings,
+    teamRosters,
+    currentTeamId,
 }: PlayerPoolProps) {
     const [search, setSearch] = useState('');
     const [positionFilter, setPositionFilter] = useState<PositionFilter>('ALL');
     const [showOnlyFavorites, setShowOnlyFavorites] = useState(false);
     const [activeTab, setActiveTab] = useState<'POOL' | 'QUEUE'>('POOL');
+
+    // Calculate restricted positions for the current team on the clock
+    const restrictedPositions = useMemo(() => {
+        if (!currentTeamId || !rosterSettings || !teamRosters) return [];
+        const roster = teamRosters[currentTeamId] || [];
+        return getRestrictedPositions(roster, rosterSettings);
+    }, [currentTeamId, rosterSettings, teamRosters]);
+
+    const isPositionRestricted = (pos: string) => {
+        // If it's my turn, I want to see if I'm restricted.
+        // If it's someone else's turn, we show their restrictions.
+        const targetPos = pos === 'DST' ? 'DEF' : pos;
+        return restrictedPositions.includes(targetPos);
+    };
 
     // Sync favorites with teamQueue from props
     // We'll use the teamQueue as the source of truth for "stars"
@@ -232,6 +335,7 @@ export function PlayerPool({
                                         onDraftPlayer={onDraftPlayer}
                                         isFavorited={favorites.has(player.id)}
                                         onToggleFavorite={toggleFavorite}
+                                        isRestricted={isPositionRestricted(player.position)}
                                     />
                                 ))
                             )}
@@ -272,6 +376,7 @@ export function PlayerPool({
                                                                     onToggleFavorite={toggleFavorite}
                                                                     showOrderControls
                                                                     dragHandleProps={provided.dragHandleProps}
+                                                                    isRestricted={isPositionRestricted(player.position)}
                                                                 />
                                                             </div>
                                                         )}
@@ -302,6 +407,7 @@ interface PlayerRowProps {
     onToggleFavorite: (id: string, e: React.MouseEvent) => void;
     showOrderControls?: boolean;
     dragHandleProps?: any;
+    isRestricted?: boolean;
 }
 
 function PlayerRow({
@@ -312,6 +418,7 @@ function PlayerRow({
     onToggleFavorite,
     showOrderControls,
     dragHandleProps,
+    isRestricted = false,
 }: PlayerRowProps) {
     return (
         <div
@@ -319,6 +426,7 @@ function PlayerRow({
                 "grid gap-2 px-4 py-2.5 items-center transition-all group",
                 "relative border-b border-slate-100",
                 "hover:bg-slate-50",
+                isRestricted && !isFavorited && "opacity-50 grayscale-[0.5]",
                 showOrderControls ? "grid-cols-[36px,44px,1fr,44px,44px,36px]" : "grid-cols-[36px,44px,1fr,44px,44px]"
             )}
         >
@@ -356,7 +464,8 @@ function PlayerRow({
                     <div className="flex items-center gap-1.5">
                         <span className={cn(
                             "text-xs font-bold truncate transition-colors",
-                            "text-slate-900 group-hover:text-blue-600"
+                            "text-slate-900 group-hover:text-blue-600",
+                            isRestricted && "text-slate-400"
                         )}>
                             {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
                         </span>
@@ -366,24 +475,40 @@ function PlayerRow({
                             </span>
                         )}
                     </div>
-                    <div className="text-[10px] text-slate-500 font-medium uppercase">{player.nflTeam || 'FA'}</div>
+                    <div className="text-[10px] text-slate-500 font-medium uppercase">
+                        {player.nflTeam || 'FA'}
+                        {isRestricted && <span className="ml-2 text-amber-600 font-bold lowercase italic text-[9px]">(pos full)</span>}
+                    </div>
                 </div>
 
                 {isMyTurn && (
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onDraftPlayer(player.id);
-                        }}
-                        className={cn(
-                            "opacity-0 group-hover:opacity-100 transition-all duration-200",
-                            "bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white",
-                            "text-[9px] font-black px-2.5 py-1 rounded-sm shadow-lg shadow-blue-500/30",
-                            "hover:scale-110 active:scale-95 shrink-0 ml-3"
-                        )}
-                    >
-                        DRAFT
-                    </button>
+                    <TooltipProvider>
+                        <Tooltip delayDuration={0}>
+                            <TooltipTrigger asChild>
+                                <button
+                                    disabled={isRestricted}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (!isRestricted) onDraftPlayer(player.id);
+                                    }}
+                                    className={cn(
+                                        "transition-all duration-200",
+                                        isRestricted
+                                            ? "bg-slate-200 text-slate-400 cursor-not-allowed opacity-50"
+                                            : "opacity-0 group-hover:opacity-100 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white shadow-lg shadow-blue-500/30 hover:scale-110",
+                                        "text-[9px] font-black px-2.5 py-1 rounded-sm shrink-0 ml-3 active:scale-95"
+                                    )}
+                                >
+                                    DRAFT
+                                </button>
+                            </TooltipTrigger>
+                            {isRestricted && (
+                                <TooltipContent side="left" className="bg-slate-900 text-white border-none text-[10px]">
+                                    Fill remaining required starters first
+                                </TooltipContent>
+                            )}
+                        </Tooltip>
+                    </TooltipProvider>
                 )}
             </div>
 

@@ -1,6 +1,7 @@
 'use server';
 
 import { CommissionerService, DraftSettingsInput } from '@/services/commissioner.service';
+import { revalidateLeague } from './league';
 
 export async function updateDraftSettingsAction(input: any) {
     try {
@@ -15,6 +16,9 @@ export async function updateDraftSettingsAction(input: any) {
         }
 
         await CommissionerService.updateDraftSettings(settings);
+        if (input.leagueId) {
+            await revalidateLeague(input.leagueId);
+        }
         return { success: true };
     } catch (error: any) {
         console.error('Failed to update draft settings:', error);
@@ -25,6 +29,7 @@ export async function updateDraftSettingsAction(input: any) {
 export async function setDraftOrderAction(leagueId: string, teamOrderList: string[]) {
     try {
         const result = await CommissionerService.setDraftOrder({ leagueId, teamOrderList });
+        await revalidateLeague(leagueId);
         return { success: true, data: result };
     } catch (error: any) {
         console.error('Failed to set draft order:', error);
@@ -35,6 +40,7 @@ export async function setDraftOrderAction(leagueId: string, teamOrderList: strin
 export async function randomizeDraftOrderAction(leagueId: string) {
     try {
         const result = await CommissionerService.randomizeDraftOrder(leagueId);
+        await revalidateLeague(leagueId);
         return { success: true, data: result };
     } catch (error: any) {
         console.error('Failed to randomize draft order:', error);
