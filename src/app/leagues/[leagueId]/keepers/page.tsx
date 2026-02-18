@@ -2,6 +2,8 @@
 import { PrismaClient } from '@prisma/client';
 import { KeeperSelectionUI } from '@/components/keepers/KeeperSelection';
 import { saveKeepers } from '@/app/actions/keepers';
+import Link from 'next/link';
+import { ArrowLeft } from 'lucide-react';
 
 const prisma = new PrismaClient();
 
@@ -98,9 +100,9 @@ export default async function KeepersPage({
                         {team.name} &middot; Select up to {settings.maxKeepers} keepers
                     </p>
                 </div>
-                <a href="/draft" className="text-sm text-primary hover:underline">
-                    ← Back to Draft Room
-                </a>
+                <Link href={`/draft?leagueId=${leagueId}`} className="text-sm text-primary hover:underline flex items-center gap-1">
+                    <ArrowLeft className="w-4 h-4" /> Back to Draft Room
+                </Link>
             </div>
             <KeeperSelectionUI
                 players={JSON.parse(JSON.stringify(allPlayers))}

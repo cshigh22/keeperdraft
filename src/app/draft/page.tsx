@@ -120,6 +120,23 @@ export default function DraftRoom() {
     return null;
   }
 
+  if (!leagueId) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-center max-w-md p-6">
+          <AlertTriangle className="w-12 h-12 text-destructive mx-auto mb-4" />
+          <h1 className="text-2xl font-bold mb-2">Invalid League</h1>
+          <p className="text-muted-foreground mb-6">
+            No league ID was provided. Please go back to the league dashboard and try again.
+          </p>
+          <Button onClick={() => (window.location.href = '/leagues')}>
+            Back to Dashboard
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   if (!userTeam) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -127,9 +144,9 @@ export default function DraftRoom() {
           <Trophy className="w-12 h-12 text-primary mx-auto mb-4" />
           <h1 className="text-2xl font-bold mb-2">No Team Found</h1>
           <p className="text-muted-foreground mb-6">
-            You don&apos;t seem to have a team in this league. Please contact the commissioner for an invite.
+            You don&apos;t seem to have a team in this league ({leagueId}). Please contact your commissioner for an invite.
           </p>
-          <Button onClick={() => (window.location.href = '/login')}>
+          <Button onClick={() => (window.location.href = '/leagues')}>
             Back to Dashboard
           </Button>
         </div>
