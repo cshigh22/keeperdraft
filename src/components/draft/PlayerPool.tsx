@@ -32,6 +32,7 @@ interface PlayerPoolProps {
     rosterSettings?: any;
     teamRosters?: Record<string, any[]>;
     currentTeamId?: string | null;
+    myTeamId?: string | null;
 }
 
 type PositionFilter = 'ALL' | 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DST';
@@ -147,22 +148,21 @@ export function PlayerPool({
     rosterSettings,
     teamRosters,
     currentTeamId,
+    myTeamId,
 }: PlayerPoolProps) {
     const [search, setSearch] = useState('');
     const [positionFilter, setPositionFilter] = useState<PositionFilter>('ALL');
     const [showOnlyFavorites, setShowOnlyFavorites] = useState(false);
     const [activeTab, setActiveTab] = useState<'POOL' | 'QUEUE'>('POOL');
 
-    // Calculate restricted positions for the current team on the clock
+    // Calculate restricted positions for the current user's team
     const restrictedPositions = useMemo(() => {
-        if (!currentTeamId || !rosterSettings || !teamRosters) return [];
-        const roster = teamRosters[currentTeamId] || [];
+        if (!myTeamId || !rosterSettings || !teamRosters) return [];
+        const roster = teamRosters[myTeamId] || [];
         return getRestrictedPositions(roster, rosterSettings);
-    }, [currentTeamId, rosterSettings, teamRosters]);
+    }, [myTeamId, rosterSettings, teamRosters]);
 
     const isPositionRestricted = (pos: string) => {
-        // If it's my turn, I want to see if I'm restricted.
-        // If it's someone else's turn, we show their restrictions.
         const targetPos = pos === 'DST' ? 'DEF' : pos;
         return restrictedPositions.includes(targetPos);
     };

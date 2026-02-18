@@ -397,6 +397,7 @@ export default function DraftRoom() {
                 rosterSettings={state.rosterSettings}
                 teamRosters={state.teamRosters}
                 currentTeamId={state.currentTeamId}
+                myTeamId={userTeam.id}
               />
             </div>
 
