@@ -142,20 +142,22 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
                 },
             });
 
-            // 5. Generate Draft Picks
-            const allTeams = await tx.team.findMany({
-                where: { leagueId: league.id },
-                orderBy: { draftPosition: 'asc' },
-            });
-
-            await CommissionerService.setDraftOrder({
-                leagueId: league.id,
-                teamOrderList: allTeams.map(t => t.id),
-            });
-
             return league.id;
         }, {
             timeout: 15000 // Increase timeout to 15s to be safe
+        });
+
+        // 5. Generate Draft Picks
+        // We do this outside the transaction because CommissionerService.setDraftOrder 
+        // uses the global prisma instance and won't see the uncommitted league/teams.
+        const allTeams = await prisma.team.findMany({
+            where: { leagueId },
+            orderBy: { draftPosition: 'asc' },
+        });
+
+        await CommissionerService.setDraftOrder({
+            leagueId,
+            teamOrderList: allTeams.map(t => t.id),
         });
 
     } catch (error) {

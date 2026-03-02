@@ -193,7 +193,6 @@ export async function seedPlayersFromSleeper(): Promise<SeedResult> {
           return (
             player.position &&
             ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'].includes(player.position) &&
-            player.full_name &&
             player.player_id
           );
         })
@@ -201,7 +200,7 @@ export async function seedPlayersFromSleeper(): Promise<SeedResult> {
           sleeperId,
           firstName: player.first_name || '',
           lastName: player.last_name || '',
-          fullName: player.full_name,
+          fullName: player.full_name || `${player.first_name || ''} ${player.last_name || ''}`.trim(),
           position: mapPosition(player.position)!,
           nflTeam: player.team || null,
           age: player.age || null,

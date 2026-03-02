@@ -57,6 +57,13 @@ export function SidebarRoster({
         initialSelectedTeamId || myTeamId || teams[0]?.id || ''
     );
 
+    // Sync when initialSelectedTeamId changes (e.g. clicking a team on the board)
+    React.useEffect(() => {
+        if (initialSelectedTeamId) {
+            setSelectedTeamId(initialSelectedTeamId);
+        }
+    }, [initialSelectedTeamId]);
+
     const selectedTeam = useMemo(() =>
         teams.find(t => t.id === selectedTeamId),
         [teams, selectedTeamId]

@@ -42,6 +42,7 @@ import {
   Trophy,
   Users,
   ArrowLeft,
+  Search,
 } from 'lucide-react';
 import type { TradeOfferedPayload } from '@/types/socket';
 import { revalidateLeague } from '@/app/actions/league';
@@ -65,6 +66,8 @@ export default function DraftRoom() {
   const [notificationCount, setNotificationCount] = useState(0);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [sidebarTab, setSidebarTab] = useState<'players' | 'roster'>('players');
+  const [selectedRosterTeamId, setSelectedRosterTeamId] = useState<string | undefined>(undefined);
 
   // Fetch user team info for this league
   useEffect(() => {
@@ -377,33 +380,49 @@ export default function DraftRoom() {
         </div>
       )}
 
-      {/* Main Content */}
-      <main className="flex-1 container mx-auto px-4 py-4 min-h-0 flex flex-col">
-        <div className="flex flex-col lg:flex-row gap-4 h-full min-h-0">
-          {/* Main Area (Draft Board) */}
-          <div className="flex-1 min-w-0 flex flex-col h-full bg-white">
-            <div className="flex-1 min-h-0">
-              <DraftBoard
-                teams={state.draftOrder}
-                completedPicks={state.completedPicks}
-                allPicks={state.allPicks}
-                totalRounds={state.totalRounds}
-                currentPick={state.currentPick}
-                currentTeamId={state.currentTeamId}
-                isPaused={state.isPaused}
-                draftType={state.draftType}
-                myTeamId={userTeam.id}
-                hideKeeperRounds={true}
-              />
-            </div>
+      {/* Main Content - 70/30 Wide Board Layout */}
+      <main className="flex-1 min-h-0 flex overflow-hidden">
+        {/* Draft Board - ~70% */}
+        <div className="flex-[7] min-w-0 flex flex-col h-full bg-white overflow-hidden">
+          <DraftBoard
+            teams={state.draftOrder}
+            completedPicks={state.completedPicks}
+            allPicks={state.allPicks}
+            totalRounds={state.totalRounds}
+            currentPick={state.currentPick}
+            currentTeamId={state.currentTeamId}
+            isPaused={state.isPaused}
+            draftType={state.draftType}
+            myTeamId={userTeam.id}
+            hideKeeperRounds={true}
+            onTeamClick={(teamId) => {
+              setSelectedRosterTeamId(teamId);
+              setSidebarTab('roster');
+            }}
+          />
+        </div>
 
-            {/* Recent Picks Footer (Optional as per image but sticking to sidebar request first) */}
-          </div>
+        {/* Tabbed Sidebar - ~30% */}
+        <div className="flex-[3] min-w-[320px] max-w-[420px] h-full border-l border-slate-200 flex flex-col bg-white overflow-hidden">
+          <Tabs value={sidebarTab} onValueChange={(v) => setSidebarTab(v as 'players' | 'roster')} className="flex flex-col h-full">
+            <TabsList className="w-full rounded-none border-b border-slate-200 bg-slate-50 h-9 flex-shrink-0 px-1">
+              <TabsTrigger
+                value="players"
+                className="flex-1 text-xs font-bold uppercase tracking-wider data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-sm h-7"
+              >
+                <Search className="w-3 h-3 mr-1.5" />
+                Players
+              </TabsTrigger>
+              <TabsTrigger
+                value="roster"
+                className="flex-1 text-xs font-bold uppercase tracking-wider data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-sm h-7"
+              >
+                <Users className="w-3 h-3 mr-1.5" />
+                Rosters
+              </TabsTrigger>
+            </TabsList>
 
-          {/* Unified Sidebar (Player Pool & Team Roster) */}
-          <div className="w-full lg:w-[720px] lg:flex-shrink-0 h-full flex flex-row border-l border-slate-200 overflow-hidden">
-            {/* Left Column: Player Pool */}
-            <div className="flex-1 h-full border-r border-slate-200">
+            <TabsContent value="players" className="flex-1 min-h-0 m-0 overflow-hidden">
               <PlayerPool
                 players={state.availablePlayers}
                 isMyTurn={isMyTurn}
@@ -416,18 +435,18 @@ export default function DraftRoom() {
                 currentTeamId={state.currentTeamId}
                 myTeamId={userTeam.id}
               />
-            </div>
+            </TabsContent>
 
-            {/* Right Column: Team Roster */}
-            <div className="flex-1 h-full">
+            <TabsContent value="roster" className="flex-1 min-h-0 m-0 overflow-hidden">
               <SidebarRoster
                 teams={state.draftOrder}
                 teamRosters={state.teamRosters}
                 rosterSettings={state.rosterSettings}
                 myTeamId={userTeam.id}
+                initialSelectedTeamId={selectedRosterTeamId || state.currentTeamId || undefined}
               />
-            </div>
-          </div>
+            </TabsContent>
+          </Tabs>
         </div>
       </main>
 
