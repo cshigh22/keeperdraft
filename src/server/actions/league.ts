@@ -302,8 +302,6 @@ export async function updateLeague(leagueId: string, prevState: any, formData: F
             });
 
             // Update Draft Settings
-            // We use the service logic but within this transaction if possible, 
-            // but since services usually use the global prisma, we'll just do it here.
             await tx.draftSettings.update({
                 where: { leagueId },
                 data: {
@@ -322,23 +320,24 @@ export async function updateLeague(leagueId: string, prevState: any, formData: F
                     timerDurationSeconds,
                 }
             });
-
-            // If draft hasn't started, regenerate picks to reflect new settings/type
-            if (league.draftState?.status === 'NOT_STARTED') {
-                // Get teams to map positions
-                const allTeams = await tx.team.findMany({
-                    where: { leagueId },
-                    orderBy: { draftPosition: 'asc' },
-                });
-
-                if (allTeams.length > 0) {
-                    await CommissionerService.setDraftOrder({
-                        leagueId,
-                        teamOrderList: allTeams.map(t => t.id)
-                    });
-                }
-            }
         });
+
+        // Regenerate picks AFTER the transaction commits so that
+        // CommissionerService.setDraftOrder (which uses the global prisma client)
+        // reads the newly committed totalRounds value from the database.
+        if (league.draftState?.status === 'NOT_STARTED') {
+            const allTeams = await prisma.team.findMany({
+                where: { leagueId },
+                orderBy: { draftPosition: 'asc' },
+            });
+
+            if (allTeams.length > 0) {
+                await CommissionerService.setDraftOrder({
+                    leagueId,
+                    teamOrderList: allTeams.map(t => t.id)
+                });
+            }
+        }
 
         return { success: true, message: 'League updated successfully' };
     } catch (error) {

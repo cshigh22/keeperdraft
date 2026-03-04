@@ -3,7 +3,7 @@
 
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { getMyTeam } from '@/lib/actions';
@@ -55,6 +55,14 @@ import { updateDraftSettingsAction, getDraftSettingsAction } from '@/app/actions
 // ============================================================================
 
 export default function CommissionerDashboard() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-background"><Loader2 className="w-8 h-8 animate-spin" /></div>}>
+      <CommissionerDashboardContent />
+    </Suspense>
+  );
+}
+
+function CommissionerDashboardContent() {
   const { data: authSession, status: authStatus } = useSession();
   const searchParams = useSearchParams();
   const leagueId = searchParams.get('leagueId') || '';

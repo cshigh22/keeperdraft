@@ -205,7 +205,8 @@ export function PlayerPool({
 
         const items = [...teamQueue];
         const [reorderedItem] = items.splice(result.source.index, 1);
-        items.splice(result.destination.index, 0, reorderedItem!);
+        if (!reorderedItem) return;
+        items.splice(result.destination.index, 0, reorderedItem);
 
         onUpdateQueue(items.map(p => p.id));
     };

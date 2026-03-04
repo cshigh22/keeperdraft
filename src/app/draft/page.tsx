@@ -3,7 +3,7 @@
 
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -57,7 +57,7 @@ import { revalidateLeague } from '@/app/actions/league';
 // DRAFT ROOM PAGE
 // ============================================================================
 
-export default function DraftRoom() {
+function DraftRoomContent() {
   const { data: session, status } = useSession();
   const searchParams = useSearchParams();
   const leagueId = searchParams.get('leagueId') || '';
@@ -509,5 +509,13 @@ export default function DraftRoom() {
         </Dialog>
       )}
     </div>
+  );
+}
+
+export default function DraftRoom() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-background"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+      <DraftRoomContent />
+    </Suspense>
   );
 }

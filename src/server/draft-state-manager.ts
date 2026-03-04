@@ -1587,39 +1587,23 @@ export class DraftStateManager {
     currentOverall: number,
     draftType: DraftType
   ): Promise<{ round: number; overall: number; teamId: string } | null> {
-    const settings = await this.prisma.draftSettings.findUnique({
-      where: { leagueId: this.leagueId },
-    });
-
-    if (!settings) return null;
-
-    const teams = await this.prisma.team.findMany({
-      where: { leagueId: this.leagueId },
-      orderBy: { draftPosition: 'asc' },
-    });
-
-    const totalTeams = teams.length;
-    const totalPicks = totalTeams * settings.totalRounds;
-
-    const nextOverall = currentOverall + 1;
-    if (nextOverall > totalPicks) {
-      return null; // Draft complete
-    }
-
-    // Find the next uncompleted pick
+    // Find the next uncompleted pick in the database with a higher overall number.
+    // This is more resilient than computing totalPicks from settings, because it
+    // uses the actual DraftPick rows as the source of truth.
     const nextPick = await this.prisma.draftPick.findFirst({
       where: {
         leagueId: this.leagueId,
-        overallPickNumber: nextOverall,
+        overallPickNumber: { gt: currentOverall },
         isComplete: false,
       },
+      orderBy: { overallPickNumber: 'asc' },
     });
 
-    if (!nextPick) return null;
+    if (!nextPick || !nextPick.overallPickNumber) return null;
 
     return {
       round: nextPick.round,
-      overall: nextOverall,
+      overall: nextPick.overallPickNumber,
       teamId: nextPick.currentOwnerId,
     };
   }
