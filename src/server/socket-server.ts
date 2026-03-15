@@ -35,10 +35,17 @@ type TypedServer = Server<
 // ============================================================================
 
 const httpServer = createServer();
+
+// Build allowed origins for production
+const allowedOrigins = [
+  process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+  'https://keeper-fawn.vercel.app',
+].filter(Boolean);
+
 const io: TypedServer = new Server(httpServer, {
   cors: {
     origin: process.env.NODE_ENV === 'production'
-      ? (process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000')
+      ? allowedOrigins
       : true, // Allow all origins in development
     methods: ['GET', 'POST'],
     credentials: true,
@@ -721,7 +728,7 @@ async function shouldPauseForTrade(
 
 export { io, httpServer };
 
-export function startSocketServer(port: number = Number(process.env.SOCKET_PORT) || 3002): void {
+export function startSocketServer(port: number = Number(process.env.PORT) || Number(process.env.SOCKET_PORT) || 3001): void {
   httpServer.once('error', (err: any) => {
     if (err.code === 'EADDRINUSE') {
       console.warn(`Port ${port} is already in use. Attempting to use port ${port + 1}...`);
@@ -731,14 +738,14 @@ export function startSocketServer(port: number = Number(process.env.SOCKET_PORT)
     }
   });
 
-  httpServer.listen(port, () => {
+  // Bind to 0.0.0.0 for Railway/Docker compatibility
+  httpServer.listen(port, '0.0.0.0', () => {
     console.log(`\n╔════════════════════════════════════════════════════════╗`);
     console.log(`║                                                        ║`);
     console.log(`║   🏈 KeeperDraft Socket.IO Server                      ║`);
     console.log(`║                                                        ║`);
     console.log(`║   Server running on port ${port}                         ║`);
-    console.log(`║                                                        ║`);
-    console.log(`║   WebSocket URL: ws://localhost:${port}                  ║`);
+    console.log(`║   Bound to 0.0.0.0 (all interfaces)                    ║`);
     console.log(`║                                                        ║`);
     console.log(`╚════════════════════════════════════════════════════════╝\n`);
   });
