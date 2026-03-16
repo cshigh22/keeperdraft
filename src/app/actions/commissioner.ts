@@ -1,6 +1,7 @@
 'use server';
 
 import { CommissionerService, DraftSettingsInput } from '@/services/commissioner.service';
+import { updateRankingsFromFantasyCalc } from '@/lib/fantasycalc-api';
 import { revalidateLeague } from './league';
 
 export async function updateDraftSettingsAction(input: any) {
@@ -64,6 +65,25 @@ export async function getDraftSettingsAction(leagueId: string) {
         return { success: true, data: settings };
     } catch (error: any) {
         console.error('Failed to get draft settings:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+export async function updatePlayerRankingsAction() {
+    try {
+        const result = await updateRankingsFromFantasyCalc(false, 1, 12);
+        return {
+            success: result.success,
+            data: {
+                totalFetched: result.totalFetched,
+                matched: result.matched,
+                updated: result.updated,
+                unmatched: result.unmatched,
+            },
+            errors: result.errors,
+        };
+    } catch (error: any) {
+        console.error('Failed to update player rankings:', error);
         return { success: false, error: error.message };
     }
 }

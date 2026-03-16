@@ -46,9 +46,11 @@ import {
   Clock,
   Shuffle,
   Loader2,
+  RefreshCw,
+  Database,
 } from 'lucide-react';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
-import { updateDraftSettingsAction, getDraftSettingsAction } from '@/app/actions/commissioner';
+import { updateDraftSettingsAction, getDraftSettingsAction, updatePlayerRankingsAction } from '@/app/actions/commissioner';
 
 // ============================================================================
 // COMMISSIONER DASHBOARD
@@ -77,6 +79,10 @@ function CommissionerDashboardContent() {
 
   const [maxKeepers, setMaxKeepers] = useState(3);
   const [keeperDeadline, setKeeperDeadline] = useState('');
+  const [rankingUpdateStatus, setRankingUpdateStatus] = useState<{
+    loading: boolean;
+    result: any | null;
+  }>({ loading: false, result: null });
 
   // Fetch team and settings
   React.useEffect(() => {
@@ -279,6 +285,46 @@ function CommissionerDashboardContent() {
                   <Shuffle className="w-8 h-8" />
                   Randomize
                 </Button>
+              </div>
+
+              <Separator />
+
+              {/* Player Rankings Update */}
+              <div className="space-y-3">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <Database className="w-4 h-4" />
+                  Player Rankings
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  Update player rankings from FantasyCalc (real fantasy values). Run this before your draft to ensure accurate rankings.
+                </p>
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      setRankingUpdateStatus({ loading: true, result: null });
+                      const result = await updatePlayerRankingsAction();
+                      setRankingUpdateStatus({ loading: false, result });
+                    }}
+                    disabled={rankingUpdateStatus.loading}
+                    className="gap-2"
+                  >
+                    {rankingUpdateStatus.loading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                    {rankingUpdateStatus.loading ? 'Updating Rankings...' : 'Update Rankings from FantasyCalc'}
+                  </Button>
+                  {rankingUpdateStatus.result && (
+                    <Badge variant={rankingUpdateStatus.result.success ? 'default' : 'destructive'}>
+                      {rankingUpdateStatus.result.success
+                        ? `✓ Updated ${rankingUpdateStatus.result.data?.updated || 0} players`
+                        : `✗ Failed: ${rankingUpdateStatus.result.error || 'Unknown error'}`
+                      }
+                    </Badge>
+                  )}
+                </div>
               </div>
 
               <Separator />
