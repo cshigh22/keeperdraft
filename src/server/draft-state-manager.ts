@@ -375,12 +375,13 @@ export class DraftStateManager {
     }
 
     // Exclude both drafted and kept players
+    // Sort with nulls last so ranked players come before unranked ones
     const players = await this.prisma.player.findMany({
       where: {
         id: { notIn: excludeIds },
       },
       orderBy: [
-        { rank: 'asc' },
+        { rank: { sort: 'asc', nulls: 'last' } },
         { fullName: 'asc' }
       ],
       take: 2000,
@@ -1362,29 +1363,33 @@ export class DraftStateManager {
 
     let remaining = durationSeconds;
 
-    this.timerInterval = setInterval(async () => {
+    this.timerInterval = setInterval(() => {
       remaining--;
 
-      // Broadcast tick
-      const state = await this.getCurrentState();
+      // Broadcast tick — no async DB call needed, just use local state
       this.io.to(this.getRoomName()).emit(SocketEvents.TIMER_TICK, {
         leagueId: this.leagueId,
         secondsRemaining: remaining,
-        currentPick: state.currentPick,
-        currentTeamId: state.currentTeamId || '',
+        currentPick: 0, // Client already knows the current pick from state
+        currentTeamId: '',
       });
 
-      // Update state periodically
-      if (remaining % 10 === 0) {
-        await this.prisma.draftState.update({
+      // Update DB periodically (fire-and-forget)
+      if (remaining % 10 === 0 && remaining > 0) {
+        this.prisma.draftState.update({
           where: { leagueId: this.leagueId },
           data: { timerSecondsRemaining: remaining },
+        }).catch((err) => {
+          console.error('[Timer] Failed to persist timer state:', err);
         });
       }
 
       if (remaining <= 0) {
         this.stopTimer();
-        await this.handleTimerExpired();
+        // Execute auto-pick with error handling to prevent silent failures
+        this.handleTimerExpired().catch((err) => {
+          console.error('[Timer] handleTimerExpired failed:', err);
+        });
       }
     }, 1000);
   }
