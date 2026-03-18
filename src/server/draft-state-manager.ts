@@ -818,44 +818,42 @@ export class DraftStateManager {
   }
 
   async makePick(teamId: string, playerId: string): Promise<void> {
-    const state = await this.getCurrentState();
-    const settings = await this.prisma.draftSettings.findUnique({
-      where: { leagueId: this.leagueId },
-    });
+    // --- Phase 1: Parallel pre-validation ---
+    const [state, settings] = await Promise.all([
+      this.getCurrentState(),
+      this.prisma.draftSettings.findUnique({
+        where: { leagueId: this.leagueId },
+      }),
+    ]);
 
-    // Verify player is available
-    const isAvailable = await this.isPlayerAvailable(playerId);
+    // Run independent validations in parallel
+    const [isAvailable, currentPick, player, restrictedPositions] = await Promise.all([
+      this.isPlayerAvailable(playerId),
+      this.prisma.draftPick.findFirst({
+        where: {
+          leagueId: this.leagueId,
+          overallPickNumber: state.currentPick,
+          isComplete: false,
+        },
+        include: {
+          currentOwner: { include: { owner: { select: { name: true } } } },
+        },
+      }),
+      this.prisma.player.findUnique({
+        where: { id: playerId },
+      }),
+      this.getRestrictedPositionsForTeam(teamId),
+    ]);
+
     if (!isAvailable) {
       throw new Error('Player is not available');
     }
-
-    // Get the current pick
-    const currentPick = await this.prisma.draftPick.findFirst({
-      where: {
-        leagueId: this.leagueId,
-        overallPickNumber: state.currentPick,
-        isComplete: false,
-      },
-      include: {
-        currentOwner: { include: { owner: { select: { name: true } } } },
-      },
-    });
-
     if (!currentPick) {
       throw new Error('No current pick found');
     }
-
-    // Get player details
-    const player = await this.prisma.player.findUnique({
-      where: { id: playerId },
-    });
-
     if (!player) {
       throw new Error('Player not found');
     }
-
-    // Double check positional requirements (server-side validation)
-    const restrictedPositions = await this.getRestrictedPositionsForTeam(teamId);
     if (restrictedPositions.includes(player.position)) {
       throw new Error(`Positional limit reached for ${player.position}`);
     }
@@ -865,7 +863,10 @@ export class DraftStateManager {
 
     const now = new Date();
 
-    // Perform the pick in a transaction
+    // --- Phase 2: Transaction (write phase) ---
+    // Calculate next pick BEFORE the transaction (read-only query, safe to do outside)
+    const nextPickResult = await this.calculateNextPick(state.currentPick, settings?.draftType || 'SNAKE');
+
     await this.prisma.$transaction(async (tx) => {
       // Update the pick
       await tx.draftPick.update({
@@ -889,16 +890,14 @@ export class DraftStateManager {
         },
       });
 
-      // Update draft state
-      const nextPick = await this.calculateNextPick(state.currentPick, settings?.draftType || 'SNAKE');
-
-      if (nextPick) {
+      // Update draft state based on pre-computed next pick
+      if (nextPickResult) {
         await tx.draftState.update({
           where: { leagueId: this.leagueId },
           data: {
-            currentRound: nextPick.round,
-            currentPick: nextPick.overall,
-            currentTeamId: nextPick.teamId,
+            currentRound: nextPickResult.round,
+            currentPick: nextPickResult.overall,
+            currentTeamId: nextPickResult.teamId,
             lastPickId: currentPick.id,
             undoAvailable: true,
             timerStartedAt: now,
@@ -922,51 +921,34 @@ export class DraftStateManager {
 
     this.stateCache = null;
 
-    // Log activity
-    await this.prisma.draftActivityLog.create({
-      data: {
-        leagueId: this.leagueId,
-        activityType: 'PICK_MADE',
-        description: `${currentPick.currentOwner.name} selected ${player.fullName}`,
-        teamId,
-        pickNumber: state.currentPick,
-        playerId,
-      },
-    });
-
-    // Get next pick info
-    const nextPickInfo = await this.calculateNextPick(state.currentPick, settings?.draftType || 'SNAKE');
+    // --- Phase 3: Build payload and emit ASAP ---
+    // Fetch next team info and updated roster in parallel
     let nextTeam: TeamSummary | undefined;
 
-    if (nextPickInfo) {
-      const team = await this.prisma.team.findUnique({
-        where: { id: nextPickInfo.teamId },
-        include: { owner: { select: { name: true } } },
-      });
+    const parallelFetches: Promise<any>[] = [
+      this.getTeamRoster(teamId),
+    ];
 
-      if (team) {
-        nextTeam = {
-          id: team.id,
-          name: team.name,
-          ownerId: team.ownerId,
-          ownerName: team.owner?.name || 'Open Slot',
-          draftPosition: team.draftPosition || 0,
-        };
-      }
+    if (nextPickResult) {
+      parallelFetches.push(
+        this.prisma.team.findUnique({
+          where: { id: nextPickResult.teamId },
+          include: { owner: { select: { name: true } } },
+        })
+      );
     }
 
-    // 5. Remove player from all queues
-    await this.prisma.draftQueue.deleteMany({
-      where: { playerId }
-    });
+    const [updatedRoster, nextTeamRecord] = await Promise.all(parallelFetches);
 
-    // 6. Broadcast updated queues via full sync
-    const syncState = await this.getFullState();
-    this.io.to(this.getRoomName()).emit(SocketEvents.STATE_SYNC, syncState);
-
-
-    // 7. Get updated roster for the team that picked
-    const updatedRoster = await this.getTeamRoster(teamId);
+    if (nextTeamRecord) {
+      nextTeam = {
+        id: nextTeamRecord.id,
+        name: nextTeamRecord.name,
+        ownerId: nextTeamRecord.ownerId,
+        ownerName: nextTeamRecord.owner?.name || 'Open Slot',
+        draftPosition: nextTeamRecord.draftPosition || 0,
+      };
+    }
 
     // Broadcast pick made
     const payload: PickMadePayload = {
@@ -1006,11 +988,11 @@ export class DraftStateManager {
       teamName: currentPick.currentOwner.name,
       pickNumber: state.currentPick,
       round: currentPick.round,
-      nextPick: nextPickInfo && nextTeam
+      nextPick: nextPickResult && nextTeam
         ? {
-          pickNumber: nextPickInfo.overall,
-          round: nextPickInfo.round,
-          teamId: nextPickInfo.teamId,
+          pickNumber: nextPickResult.overall,
+          round: nextPickResult.round,
+          teamId: nextPickResult.teamId,
           team: nextTeam,
         }
         : undefined,
@@ -1028,13 +1010,13 @@ export class DraftStateManager {
     });
 
     // If there's a next pick, start the timer and emit on the clock
-    if (nextPickInfo && nextTeam) {
+    if (nextPickResult && nextTeam) {
       const onClockPayload: OnTheClockPayload = {
         leagueId: this.leagueId,
-        teamId: nextPickInfo.teamId,
+        teamId: nextPickResult.teamId,
         team: nextTeam,
-        pickNumber: nextPickInfo.overall,
-        round: nextPickInfo.round,
+        pickNumber: nextPickResult.overall,
+        round: nextPickResult.round,
         timerDuration: settings?.timerDurationSeconds || 90,
         timerStartedAt: now.toISOString(),
       };
@@ -1047,6 +1029,26 @@ export class DraftStateManager {
         completedAt: now.toISOString(),
       });
     }
+
+    // --- Phase 4: Deferred non-critical work (don't block the response) ---
+    // These run after the socket emit so the client gets a fast response
+    Promise.all([
+      this.prisma.draftActivityLog.create({
+        data: {
+          leagueId: this.leagueId,
+          activityType: 'PICK_MADE',
+          description: `${currentPick.currentOwner.name} selected ${player.fullName}`,
+          teamId,
+          pickNumber: state.currentPick,
+          playerId,
+        },
+      }),
+      this.prisma.draftQueue.deleteMany({
+        where: { playerId }
+      }),
+    ]).catch((err) => {
+      console.error('[makePick] Deferred work failed:', err);
+    });
   }
 
 

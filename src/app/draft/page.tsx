@@ -86,6 +86,7 @@ function DraftRoomContent() {
   // Socket connection
   const {
     state,
+    timerSeconds,
     isMyTurn,
     myTeam,
     actions,
@@ -220,7 +221,7 @@ function DraftRoomContent() {
                   </div>
                   <Separator orientation="vertical" className="h-8" />
                   <DraftTimer
-                    secondsRemaining={state.timerSecondsRemaining}
+                    secondsRemaining={timerSeconds}
                     isPaused={state.isPaused}
                   />
                 </>

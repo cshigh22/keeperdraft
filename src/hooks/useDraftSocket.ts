@@ -63,6 +63,7 @@ export interface DraftState {
   };
   lastUpdate: Date | null;
   error: ErrorPayload | null;
+  pendingPickId: string | null;
 }
 
 interface UseDraftSocketOptions {
@@ -78,6 +79,7 @@ interface UseDraftSocketOptions {
 
 interface UseDraftSocketReturn {
   state: DraftState;
+  timerSeconds: number | null;
   isMyTurn: boolean;
   myTeam: TeamSummary | null;
   actions: {
@@ -129,6 +131,7 @@ const initialState: DraftState = {
   teamQueues: {},
   lastUpdate: null,
   error: null,
+  pendingPickId: null,
 };
 
 // ============================================================================
@@ -149,6 +152,9 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
 
   const socketRef = useRef<TypedSocket | null>(null);
   const [state, setState] = useState<DraftState>(initialState);
+
+  // Separate timer state to avoid re-rendering the entire component tree on every tick
+  const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
 
   // Get my team from draft order
   const myTeam = state.draftOrder.find((t) => t.id === teamId) || null;
@@ -302,18 +308,16 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       }));
     });
 
-    // Timer tick
+    // Timer tick — only update the isolated timer state, NOT the full draft state
     socket.on(SocketEvents.TIMER_TICK, (payload: TimerTickPayload) => {
-      setState((prev) => ({
-        ...prev,
-        timerSecondsRemaining: payload.secondsRemaining,
-      }));
+      setTimerSeconds(payload.secondsRemaining);
     });
 
-    // Pick made
+    // Pick made — reconcile with any optimistic state
     socket.on(SocketEvents.PICK_MADE, (payload: PickMadePayload) => {
       setState((prev) => {
         const newCompletedPicks = [...prev.completedPicks, payload.pick];
+        // Remove player (may already be removed by optimistic update)
         const newAvailablePlayers = prev.availablePlayers.filter(
           (p) => p.id !== payload.player.id
         );
@@ -337,6 +341,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
               return a.overallPickNumber - b.overallPickNumber;
             });
           })(),
+          pendingPickId: null, // Clear optimistic flag
           lastUpdate: new Date(),
         };
       });
@@ -490,6 +495,14 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
   const actions = {
     makePick: useCallback((playerId: string) => {
       if (!socketRef.current || !teamId) return;
+
+      // OPTIMISTIC: Update local state immediately before server round-trip
+      setState((prev) => ({
+        ...prev,
+        availablePlayers: prev.availablePlayers.filter((p) => p.id !== playerId),
+        pendingPickId: playerId,
+      }));
+
       socketRef.current.emit(SocketEvents.PICK_MADE, {
         leagueId,
         playerId,
@@ -582,6 +595,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
 
   return {
     state,
+    timerSeconds,
     isMyTurn,
     myTeam,
     actions,

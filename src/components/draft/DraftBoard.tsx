@@ -66,7 +66,7 @@ function getPositionStyle(position?: string) {
 // PICK CELL COMPONENT
 // ============================================================================
 
-function PickCell({
+const PickCell = React.memo(function PickCell({
   pick,
   team,
   round,
@@ -188,7 +188,19 @@ function PickCell({
       </Tooltip>
     </TooltipProvider>
   );
-}
+}, (prevProps, nextProps) => {
+  // Custom comparator: only re-render when meaningful props change
+  return (
+    prevProps.pick?.isComplete === nextProps.pick?.isComplete &&
+    prevProps.pick?.selectedPlayer?.id === nextProps.pick?.selectedPlayer?.id &&
+    prevProps.isCurrentPick === nextProps.isCurrentPick &&
+    prevProps.isPaused === nextProps.isPaused &&
+    prevProps.isMyTeam === nextProps.isMyTeam &&
+    prevProps.isTraded === nextProps.isTraded &&
+    prevProps.pickNumber === nextProps.pickNumber &&
+    prevProps.team.id === nextProps.team.id
+  );
+});
 
 export function DraftBoard({
   teams,

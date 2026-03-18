@@ -411,7 +411,7 @@ interface PlayerRowProps {
     isRestricted?: boolean;
 }
 
-function PlayerRow({
+const PlayerRow = React.memo(function PlayerRow({
     player,
     isMyTurn,
     onDraftPlayer,
@@ -534,6 +534,15 @@ function PlayerRow({
             )}
         </div>
     );
-}
+}, (prevProps, nextProps) => {
+    // Custom comparator: only re-render when props that affect output change
+    return (
+        prevProps.player.id === nextProps.player.id &&
+        prevProps.isMyTurn === nextProps.isMyTurn &&
+        prevProps.isFavorited === nextProps.isFavorited &&
+        prevProps.isRestricted === nextProps.isRestricted &&
+        prevProps.showOrderControls === nextProps.showOrderControls
+    );
+});
 
 export default PlayerPool;
