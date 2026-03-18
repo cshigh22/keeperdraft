@@ -13,7 +13,8 @@ export const SocketEvents = {
   DISCONNECT: 'disconnect',
   JOIN_DRAFT_ROOM: 'join_draft_room',
   LEAVE_DRAFT_ROOM: 'leave_draft_room',
-
+  AUTHENTICATE: 'authenticate',
+  
   // Draft lifecycle events
   DRAFT_START: 'draft_start',
   DRAFT_PAUSE: 'draft_pause',
@@ -306,6 +307,7 @@ export interface ErrorPayload {
 export interface ClientToServerEvents {
   [SocketEvents.JOIN_DRAFT_ROOM]: (payload: JoinDraftRoomPayload) => void;
   [SocketEvents.LEAVE_DRAFT_ROOM]: (payload: { leagueId: string }) => void;
+  [SocketEvents.AUTHENTICATE]: (payload: { userId: string }) => void;
 
   // Commissioner actions
   [SocketEvents.DRAFT_START]: (payload: { leagueId: string }) => void;

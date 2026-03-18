@@ -104,6 +104,17 @@ io.on(SocketEvents.CONNECTION, (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
   // -------------------------------------------------------------------------
+  // USER IDENTIFICATION (Global)
+  // -------------------------------------------------------------------------
+  socket.on(SocketEvents.AUTHENTICATE, (payload: { userId: string }) => {
+    const { userId } = payload;
+    if (userId) {
+      socket.join(`user:${userId}`);
+      console.log(`Socket ${socket.id} authenticated as user ${userId}`);
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // JOIN DRAFT ROOM
   // -------------------------------------------------------------------------
   socket.on(SocketEvents.JOIN_DRAFT_ROOM, async (payload) => {
@@ -425,6 +436,11 @@ io.on(SocketEvents.CONNECTION, (socket) => {
       // Broadcast to both teams and commissioner
       const room = getRoomName(leagueId);
       io.to(room).emit(SocketEvents.TRADE_OFFERED, trade);
+
+      // ALSO emit to receiver directly for global notification
+      if (trade.receiverTeam.ownerId) {
+        io.to(`user:${trade.receiverTeam.ownerId}`).emit(SocketEvents.TRADE_OFFERED, trade);
+      }
     } catch (error) {
       console.error('Error creating trade:', error);
       socket.emit(SocketEvents.ERROR, {
