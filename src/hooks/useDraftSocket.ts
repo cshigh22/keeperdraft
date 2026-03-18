@@ -101,6 +101,7 @@ interface UseDraftSocketReturn {
     undoLastPick: () => void;
     updateOrder: (teamOrder: string[]) => void;
     updateQueue: (teamId: string, playerIds: string[]) => void;
+    toggleQueue: (teamId: string, playerId: string) => void;
   };
   disconnect: () => void;
   reconnect: () => void;
@@ -861,6 +862,38 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       });
 
       socketRef.current.emit(SocketEvents.UPDATE_QUEUE, { leagueId, teamId, playerIds });
+    }, [leagueId]),
+
+    toggleQueue: useCallback((teamId: string, playerId: string) => {
+      if (!socketRef.current) return;
+
+      setState((prev) => {
+        const currentQueue = prev.teamQueues[teamId] || [];
+        const isQueued = currentQueue.some((p) => p.id === playerId);
+        let updatedQueue: PlayerSummary[];
+
+        if (isQueued) {
+          updatedQueue = currentQueue.filter((p) => p.id !== playerId);
+        } else {
+          // Find the player object to add - check pool, then all picks for keepers
+          const player = prev.availablePlayers.find((p) => p.id === playerId) || 
+                         prev.allPicks.find((p) => p.selectedPlayer?.id === playerId)?.selectedPlayer;
+          
+          if (!player) return prev;
+          updatedQueue = [...currentQueue, player];
+        }
+
+        const playerIds = updatedQueue.map((p) => p.id);
+        socketRef.current?.emit(SocketEvents.UPDATE_QUEUE, { leagueId, teamId, playerIds });
+
+        return {
+          ...prev,
+          teamQueues: {
+            ...prev.teamQueues,
+            [teamId]: updatedQueue
+          }
+        };
+      });
     }, [leagueId]),
   };
 

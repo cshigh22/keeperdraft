@@ -430,6 +430,7 @@ function DraftRoomContent() {
                 isLoading={!state.isConnected}
                 teamQueue={state.teamQueues[userTeam.id] || []}
                 onUpdateQueue={(playerIds) => actions.updateQueue(userTeam.id, playerIds)}
+                onToggleQueue={(playerId) => actions.toggleQueue(userTeam.id, playerId)}
                 rosterSettings={state.rosterSettings}
                 teamRosters={state.teamRosters}
                 currentTeamId={state.currentTeamId}

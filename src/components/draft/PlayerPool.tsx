@@ -30,6 +30,7 @@ interface PlayerPoolProps {
     isLoading?: boolean;
     teamQueue: PlayerSummary[];
     onUpdateQueue: (playerIds: string[]) => void;
+    onToggleQueue: (playerId: string) => void;
     rosterSettings?: any;
     teamRosters?: Record<string, any[]>;
     currentTeamId?: string | null;
@@ -173,6 +174,7 @@ export function PlayerPool({
     onDraftPlayer,
     teamQueue,
     onUpdateQueue,
+    onToggleQueue,
     isLoading = false,
     rosterSettings,
     teamRosters,
@@ -208,11 +210,7 @@ export function PlayerPool({
     // Toggle favorite (Add/Remove from Queue)
     const toggleFavorite = (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
-        if (favorites.has(id)) {
-            onUpdateQueue(teamQueue.filter(p => p.id !== id).map(p => p.id));
-        } else {
-            onUpdateQueue([...teamQueue.map(p => p.id), id]);
-        }
+        onToggleQueue(id);
     };
 
     const moveQueuedPlayer = (id: string, direction: 'UP' | 'DOWN') => {
