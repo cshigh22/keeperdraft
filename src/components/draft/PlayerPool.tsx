@@ -598,7 +598,6 @@ const PlayerRow = React.memo(function PlayerRow({
                                         if (!isRestricted) onDraftPlayer(player.id);
                                     }}
                                     className={cn(
-                                        "transition-all duration-200",
                                         isRestricted
                                             ? "bg-slate-200 text-slate-400 cursor-not-allowed opacity-50"
                                             : "opacity-0 group-hover:opacity-100 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white shadow-lg shadow-blue-500/30 hover:scale-110",

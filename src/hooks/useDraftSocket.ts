@@ -316,16 +316,28 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
     // Pick made — reconcile with any optimistic state
     socket.on(SocketEvents.PICK_MADE, (payload: PickMadePayload) => {
       setState((prev) => {
-        const newCompletedPicks = [...prev.completedPicks, payload.pick];
+        // Filter out any optimistic pick matching this pick number to avoid duplicates
+        const newCompletedPicks = [
+          ...prev.completedPicks.filter(p => p.overallPickNumber !== payload.pickNumber),
+          payload.pick
+        ];
+
         // Remove player (may already be removed by optimistic update)
         const newAvailablePlayers = prev.availablePlayers.filter(
           (p) => p.id !== payload.player.id
+        );
+
+        // Update allPicks by replacing the pick at this overall pick number
+        // This ensures the official server pick replaces our optimistic "opt-..." pick
+        const updatedAllPicks = prev.allPicks.map(p => 
+          p.overallPickNumber === payload.pickNumber ? payload.pick : p
         );
 
         return {
           ...prev,
           completedPicks: newCompletedPicks,
           availablePlayers: newAvailablePlayers,
+          allPicks: updatedAllPicks,
           currentPick: payload.nextPick?.pickNumber || prev.currentPick,
           currentRound: payload.nextPick?.round || prev.currentRound,
           currentTeamId: payload.nextPick?.teamId || null,
@@ -333,14 +345,6 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
           teamRosters: payload.teamRosterUpdates
             ? { ...prev.teamRosters, ...payload.teamRosterUpdates }
             : prev.teamRosters,
-          allPicks: (() => {
-            const pickMap = new Map(prev.allPicks.map((p) => [p.id, p]));
-            pickMap.set(payload.pick.id, payload.pick);
-            return Array.from(pickMap.values()).sort((a, b) => {
-              if (a.season !== b.season) return a.season - b.season;
-              return a.overallPickNumber - b.overallPickNumber;
-            });
-          })(),
           pendingPickId: null, // Clear optimistic flag
           lastUpdate: new Date(),
         };
@@ -496,12 +500,59 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
     makePick: useCallback((playerId: string) => {
       if (!socketRef.current || !teamId) return;
 
-      // OPTIMISTIC: Update local state immediately before server round-trip
-      setState((prev) => ({
-        ...prev,
-        availablePlayers: prev.availablePlayers.filter((p) => p.id !== playerId),
-        pendingPickId: playerId,
-      }));
+      setState((prev) => {
+        // Find the player details for the optimistic update
+        const player = prev.availablePlayers.find((p) => p.id === playerId);
+        if (!player) return prev;
+
+        // 1. Construct optimistic pick for the Draft Board
+        const optimisticPick: DraftPickSummary = {
+          id: `opt-${Date.now()}`,
+          season: new Date().getFullYear(),
+          round: prev.currentRound,
+          pickInRound: 0, // Approximate
+          overallPickNumber: prev.currentPick,
+          currentOwnerId: teamId,
+          currentOwnerName: prev.currentTeam?.name || 'Me',
+          originalOwnerId: teamId,
+          isComplete: true,
+          isKeeper: false,
+          selectedPlayer: player,
+          selectedAt: new Date().toISOString(),
+        };
+
+        // 2. Add player to the team roster sidebar
+        const newRosterPlayer: RosterPlayer = { ...player, isKeeper: false, round: prev.currentRound };
+        const updatedRosters = {
+          ...prev.teamRosters,
+          [teamId]: [...(prev.teamRosters[teamId] || []), newRosterPlayer],
+        };
+
+        // 3. Update the allPicks list so the Draft Board fills in immediately
+        const updatedAllPicks = prev.allPicks.map(p => 
+          p.overallPickNumber === prev.currentPick ? optimisticPick : p
+        );
+
+        // 4. Update the queue
+        const updatedQueues = {
+          ...prev.teamQueues,
+          [teamId]: (prev.teamQueues[teamId] || []).filter(p => p.id !== playerId)
+        };
+
+        return {
+          ...prev,
+          availablePlayers: prev.availablePlayers.filter((p) => p.id !== playerId),
+          completedPicks: [...prev.completedPicks, optimisticPick],
+          allPicks: updatedAllPicks,
+          teamRosters: updatedRosters,
+          teamQueues: updatedQueues,
+          pendingPickId: playerId,
+          currentTeamId: null, // Disable draft button until server confirms next team
+          currentTeam: null,
+          timerSecondsRemaining: null,
+          lastUpdate: new Date(),
+        };
+      });
 
       socketRef.current.emit(SocketEvents.PICK_MADE, {
         leagueId,
