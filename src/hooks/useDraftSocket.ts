@@ -102,6 +102,7 @@ interface UseDraftSocketReturn {
     updateOrder: (teamOrder: string[]) => void;
     updateQueue: (teamId: string, playerIds: string[]) => void;
     toggleQueue: (teamId: string, playerId: string) => void;
+    updateTeamName: (teamId: string, name: string) => void;
   };
   disconnect: () => void;
   reconnect: () => void;
@@ -492,6 +493,42 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
         },
         lastUpdate: new Date(),
       }));
+    });
+
+    // Team name updated
+    socket.on(SocketEvents.TEAM_UPDATED, (payload) => {
+      setState((prev) => {
+        const { teamId, name } = payload;
+        
+        // Update draftOrder
+        const updatedOrder = prev.draftOrder.map(t => 
+          t.id === teamId ? { ...t, name } : t
+        );
+
+        // Update currentTeam if it matches
+        const updatedCurrentTeam = prev.currentTeam?.id === teamId 
+          ? { ...prev.currentTeam, name } 
+          : prev.currentTeam;
+
+        // Update allPicks (currentOwnerName)
+        const updatedAllPicks = prev.allPicks.map(p => 
+          p.currentOwnerId === teamId ? { ...p, currentOwnerName: name } : p
+        );
+
+        // Update completedPicks
+        const updatedCompletedPicks = prev.completedPicks.map(p => 
+          p.currentOwnerId === teamId ? { ...p, currentOwnerName: name } : p
+        );
+
+        return {
+          ...prev,
+          draftOrder: updatedOrder,
+          currentTeam: updatedCurrentTeam,
+          allPicks: updatedAllPicks,
+          completedPicks: updatedCompletedPicks,
+          lastUpdate: new Date(),
+        };
+      });
     });
 
     // Error handling
@@ -894,6 +931,28 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
           }
         };
       });
+    }, [leagueId]),
+
+    updateTeamName: useCallback((teamId: string, name: string) => {
+      if (!socketRef.current) return;
+      
+      // OPTIMISTIC UPDATE
+      setState((prev) => {
+        const updatedOrder = prev.draftOrder.map(t => t.id === teamId ? { ...t, name } : t);
+        const updatedCurrentTeam = prev.currentTeam?.id === teamId ? { ...prev.currentTeam, name } : prev.currentTeam;
+        const updatedAllPicks = prev.allPicks.map(p => p.currentOwnerId === teamId ? { ...p, currentOwnerName: name } : p);
+        const updatedCompletedPicks = prev.completedPicks.map(p => p.currentOwnerId === teamId ? { ...p, currentOwnerName: name } : p);
+        
+        return {
+          ...prev,
+          draftOrder: updatedOrder,
+          currentTeam: updatedCurrentTeam,
+          allPicks: updatedAllPicks,
+          completedPicks: updatedCompletedPicks,
+        };
+      });
+
+      socketRef.current.emit(SocketEvents.UPDATE_TEAM, { leagueId, teamId, name });
     }, [leagueId]),
   };
 

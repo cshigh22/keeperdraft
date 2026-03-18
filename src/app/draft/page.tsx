@@ -446,6 +446,7 @@ function DraftRoomContent() {
                 rosterSettings={state.rosterSettings}
                 myTeamId={userTeam.id}
                 initialSelectedTeamId={selectedRosterTeamId || state.currentTeamId || undefined}
+                onUpdateTeamName={actions.updateTeamName}
               />
             </TabsContent>
           </Tabs>

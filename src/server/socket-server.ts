@@ -654,6 +654,51 @@ io.on(SocketEvents.CONNECTION, (socket) => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // UPDATE TEAM
+  // -------------------------------------------------------------------------
+  socket.on(SocketEvents.UPDATE_TEAM, async (payload) => {
+    const { leagueId, teamId, name } = payload;
+
+    try {
+      // Verify authorization: must be owner of the team or commissioner
+      const team = await prisma.team.findUnique({
+        where: { id: teamId },
+        select: { ownerId: true },
+      });
+
+      const isOwner = team?.ownerId === socket.data.userId;
+      const isAdmin = socket.data.isCommissioner;
+
+      if (!isOwner && !isAdmin) {
+        socket.emit(SocketEvents.ERROR, {
+          code: 'UNAUTHORIZED',
+          message: 'You are not authorized to update this team',
+        });
+        return;
+      }
+
+      const updatedTeam = await prisma.team.update({
+        where: { id: teamId },
+        data: { name },
+      });
+
+      // Broadcast to all team members in the league
+      io.to(getRoomName(leagueId)).emit(SocketEvents.TEAM_UPDATED, {
+        teamId,
+        name: updatedTeam.name,
+      });
+
+      console.log(`Team ${teamId} updated to name: ${name}`);
+    } catch (error) {
+      console.error('Error updating team:', error);
+      socket.emit(SocketEvents.ERROR, {
+        code: 'UPDATE_FAILED',
+        message: 'Failed to update team name',
+      });
+    }
+  });
+
 
   // -------------------------------------------------------------------------
   // DISCONNECT

@@ -15,7 +15,9 @@ import {
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { Lock } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Lock, Edit2 } from 'lucide-react';
 import type { TeamSummary, RosterPlayer, RosterSettings } from '@/types/socket';
 
 interface SidebarRosterProps {
@@ -24,6 +26,7 @@ interface SidebarRosterProps {
     rosterSettings?: RosterSettings;
     myTeamId?: string;
     initialSelectedTeamId?: string;
+    onUpdateTeamName?: (teamId: string, name: string) => void;
 }
 
 // ============================================================================
@@ -52,10 +55,13 @@ export function SidebarRoster({
     rosterSettings,
     myTeamId,
     initialSelectedTeamId,
+    onUpdateTeamName,
 }: SidebarRosterProps) {
     const [selectedTeamId, setSelectedTeamId] = useState<string>(
         initialSelectedTeamId || myTeamId || teams[0]?.id || ''
     );
+    const [isEditing, setIsEditing] = useState(false);
+    const [editName, setEditName] = useState('');
 
     // Sync when initialSelectedTeamId changes (e.g. clicking a team on the board)
     React.useEffect(() => {
@@ -131,41 +137,86 @@ export function SidebarRoster({
     return (
         <div className="flex flex-col h-full bg-white text-slate-900 border-l border-slate-200 overflow-hidden">
             {/* Header */}
-            <div className="p-4 space-y-4 bg-slate-50/50">
-                <h2 className="text-sm font-bold tracking-wider text-slate-500 uppercase">Team Roster</h2>
+            <div className="p-4 space-y-4 bg-slate-900 border-b border-slate-800">
+                <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-bold tracking-wider text-slate-400 uppercase">Team Roster</h2>
+                    {selectedTeamId === myTeamId && !isEditing && (
+                        <Button 
+                            variant="ghost" 
+                            size="icon" 
+                            className="h-7 w-7 text-slate-500 hover:text-blue-400 hover:bg-white/5"
+                            onClick={() => setIsEditing(true)}
+                        >
+                            <Edit2 className="w-4 h-4" />
+                        </Button>
+                    )}
+                </div>
 
-                {/* Team Selector */}
-                <Select value={selectedTeamId} onValueChange={setSelectedTeamId}>
-                    <SelectTrigger className="bg-white border-slate-200 text-sm h-10 ring-offset-transparent focus:ring-blue-500/50">
-                        <div className="flex items-center gap-2">
-                            <div className="w-2 h-2 rounded-full bg-blue-500" />
-                            <SelectValue placeholder="Select Team" />
-                        </div>
-                    </SelectTrigger>
-                    <SelectContent className="bg-white border-slate-200 text-slate-900">
-                        {teams.map(t => (
-                            <SelectItem key={t.id} value={t.id} className="hover:bg-slate-100 focus:bg-slate-100 cursor-pointer">
-                                {t.name}
-                            </SelectItem>
-                        ))}
-                    </SelectContent>
-                </Select>
+                {isEditing ? (
+                    <div className="flex gap-2 animate-in fade-in duration-200">
+                        <Input 
+                            value={editName}
+                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditName(e.target.value)}
+                            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                                if (e.key === 'Enter') {
+                                    if (editName.trim()) onUpdateTeamName?.(selectedTeamId, editName.trim());
+                                    setIsEditing(false);
+                                }
+                                if (e.key === 'Escape') setIsEditing(false);
+                            }}
+                            autoFocus
+                            className="h-9 text-sm bg-slate-800 border-slate-700 text-white focus:ring-blue-500"
+                            placeholder="Enter team name"
+                        />
+                        <Button 
+                            size="sm" 
+                            className="h-9 px-3 bg-blue-600 hover:bg-blue-700 text-xs font-bold"
+                            onClick={() => {
+                                if (editName.trim()) onUpdateTeamName?.(selectedTeamId, editName.trim());
+                                setIsEditing(false);
+                            }}
+                        >
+                            Save
+                        </Button>
+                    </div>
+                ) : (
+                    <Select value={selectedTeamId} onValueChange={(val) => {
+                        setSelectedTeamId(val);
+                        setIsEditing(false);
+                    }}>
+                        <SelectTrigger className="bg-slate-800 border-slate-700 text-slate-200 text-sm h-10 ring-offset-transparent focus:ring-blue-500/50">
+                            <div className="flex items-center gap-2">
+                                <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]" />
+                                <SelectValue placeholder="Select Team" />
+                            </div>
+                        </SelectTrigger>
+                        <SelectContent className="bg-slate-900 border-slate-800 text-white shadow-xl">
+                            {teams.map(t => (
+                                <SelectItem key={t.id} value={t.id} className="hover:bg-slate-800 focus:bg-slate-800 cursor-pointer">
+                                    <span className={cn(t.id === myTeamId && "font-bold text-blue-400")}>
+                                        {t.name} {t.id === myTeamId && "(You)"}
+                                    </span>
+                                </SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                )}
 
                 {/* Team Meta */}
-                <div className="flex items-center justify-between text-xs">
-                    <div className="space-y-0.5">
-                        <div className="flex items-center gap-2 text-slate-400">
-                            <span className="font-medium text-slate-300">@{selectedTeam?.ownerName}</span>
+                <div className="flex items-center justify-between text-xs pt-1">
+                    <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                            <span className="font-bold text-slate-300">@{selectedTeam?.ownerName}</span>
                         </div>
-                        <div className="text-slate-500 font-mono tracking-tighter uppercase">
+                        <div className="text-slate-500 font-mono tracking-tighter uppercase px-1.5 py-0.5 bg-slate-800/50 rounded-md w-fit">
                             Pick #{selectedTeam?.draftPosition || 0}
                         </div>
                     </div>
-                    <div className="text-right space-y-0.5">
-                        <div className="text-slate-300 font-bold">
+                    <div className="text-right space-y-1">
+                        <div className="text-slate-300 font-bold bg-green-500/10 px-2 py-0.5 rounded border border-green-500/20">
                             {stats.drafted} <span className="text-slate-500 font-normal">drafted</span>
                         </div>
-                        <div className="text-slate-300 font-bold">
+                        <div className="text-slate-300 font-bold bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
                             {stats.keepers} <span className="text-slate-500 font-normal">keepers</span>
                         </div>
                     </div>

@@ -43,6 +43,8 @@ export const SocketEvents = {
   // Order/Settings events
   ORDER_UPDATED: 'order_updated',
   SETTINGS_UPDATED: 'settings_updated',
+  UPDATE_TEAM: 'update_team',
+  TEAM_UPDATED: 'team_updated',
 
   // State sync events
   STATE_SYNC: 'state_sync',
@@ -330,6 +332,7 @@ export interface ClientToServerEvents {
   [SocketEvents.TRADE_REJECTED]: (payload: { leagueId: string; tradeId: string }) => void;
   [SocketEvents.TRADE_CANCELLED]: (payload: { leagueId: string; tradeId: string }) => void;
   [SocketEvents.UPDATE_QUEUE]: (payload: { leagueId: string; teamId: string; playerIds: string[] }) => void;
+  [SocketEvents.UPDATE_TEAM]: (payload: { leagueId: string; teamId: string; name: string }) => void;
 }
 
 // ============================================================================
@@ -358,6 +361,7 @@ export interface ServerToClientEvents {
   [SocketEvents.ORDER_UPDATED]: (payload: OrderUpdatedPayload) => void;
   [SocketEvents.SETTINGS_UPDATED]: (payload: { leagueId: string; settings: Record<string, unknown> }) => void;
   [SocketEvents.QUEUE_UPDATED]: (payload: { leagueId: string; teamId: string; queue: PlayerSummary[] }) => void;
+  [SocketEvents.TEAM_UPDATED]: (payload: { teamId: string; name: string }) => void;
   [SocketEvents.ERROR]: (payload: ErrorPayload) => void;
 }
 
