@@ -104,16 +104,39 @@ function getRestrictedPositions(roster: any[] = [], settings: any = {}, remainin
     const currentBenchCount = leftQB + leftRB + leftWR + leftTE + leftK + leftDEF;
     const benchLimit = settings.benchCount || 0;
 
-    // If no starters left, we are in "Bench mode" where positions are NOT restricted
+    // If no starters left, no restrictions
     if (totalEmptyStarters === 0) return [];
 
-    // KEY FIX: Restrict when remaining picks <= unfilled starters
-    // This prevents teams with many keepers from skipping required positions
-    const mustFillStarters = remainingPicks <= totalEmptyStarters;
+    // Exclusive starters = can ONLY be filled by their specific position
+    // Fungible starters = FLEX/SFLEX accept multiple positions
+    const exclusiveUnfilled = remQB + remRB + remWR + remTE + remK + remDEF;
 
-    // Rule: If bench is under the limit AND team has plenty of picks, draft freely.
-    // Otherwise, you MUST fulfill the remaining starting positions.
-    if (!mustFillStarters && currentBenchCount < benchLimit) return [];
+    // TIER 1: remaining picks ≤ exclusive unfilled → every pick must fill an exclusive slot
+    if (remainingPicks <= exclusiveUnfilled) {
+        const restricted = [];
+        if (remQB === 0) restricted.push('QB');
+        if (remRB === 0) restricted.push('RB');
+        if (remWR === 0) restricted.push('WR');
+        if (remTE === 0) restricted.push('TE');
+        if (remK === 0) restricted.push('K');
+        if (remDEF === 0) restricted.push('DEF');
+        return restricted;
+    }
+
+    // TIER 2: remaining picks ≤ total empty starters → allow fungible too
+    if (remainingPicks <= totalEmptyStarters) {
+        const restricted = [];
+        if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
+        if (remRB === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('RB');
+        if (remWR === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('WR');
+        if (remTE === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('TE');
+        if (remK === 0) restricted.push('K');
+        if (remDEF === 0) restricted.push('DEF');
+        return restricted;
+    }
+
+    // TIER 3: plenty of picks — only restrict when bench is full
+    if (currentBenchCount < benchLimit) return [];
 
     const restricted = [];
     if (remQB === 0 && remSFLEX === 0) restricted.push('QB');

@@ -867,7 +867,8 @@ export class DraftStateManager {
     if (!player) {
       throw new Error('Player not found');
     }
-    if (restrictedPositions.includes(player.position)) {
+    const playerPos = this.normalizePos(player.position);
+    if (restrictedPositions.includes(playerPos)) {
       throw new Error(`Positional limit reached for ${player.position}`);
     }
 
@@ -1448,7 +1449,8 @@ export class DraftStateManager {
 
     for (const queueItem of teamQueue) {
       const isAvailable = await this.isPlayerAvailable(queueItem.playerId);
-      const isRestricted = restrictedPositions.includes(queueItem.player.position);
+      const playerPos = this.normalizePos(queueItem.player.position);
+      const isRestricted = restrictedPositions.includes(playerPos);
 
       if (isAvailable && !isRestricted) {
         console.log(`[TimerExpired] Drafting top valid queued player ${queueItem.playerId} for team ${state.currentTeamId}`);
@@ -1459,7 +1461,10 @@ export class DraftStateManager {
 
     // 2. Fallback to best available player that satisfies positional requirements
     const availablePlayers = await this.getAvailablePlayers();
-    const validPlayer = availablePlayers.find(p => !restrictedPositions.includes(p.position));
+    const validPlayer = availablePlayers.find(p => {
+      const pPos = this.normalizePos(p.position);
+      return !restrictedPositions.includes(pPos);
+    });
 
     if (validPlayer) {
       console.log(`[TimerExpired] No queue found. Drafting best valid player ${validPlayer.fullName} for team ${state.currentTeamId}`);
@@ -1473,6 +1478,10 @@ export class DraftStateManager {
         await this.makePick(state.currentTeamId, bestPlayer.id);
       }
     }
+  }
+
+  private normalizePos(pos: string): string {
+    return pos === 'DST' ? 'DEF' : pos;
   }
 
   // ===========================================================================
@@ -1530,8 +1539,7 @@ export class DraftStateManager {
 
     const counts: Record<string, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
     roster.forEach((r) => {
-      const pos = r.player.position as string;
-      const targetPos = pos === 'DST' ? 'DEF' : pos;
+      const targetPos = this.normalizePos(r.player.position);
       if (counts[targetPos] !== undefined) {
         counts[targetPos]++;
       }
@@ -1601,13 +1609,41 @@ export class DraftStateManager {
     // If all starters are filled, no restrictions needed
     if (totalEmptyStarters === 0) return [];
 
-    // KEY FIX: Restrict positions when EITHER:
-    // 1. The bench is full (original logic), OR
-    // 2. The team has limited remaining picks — they MUST fill required starters
-    //    (e.g., 7 keepers + 6-round draft = only 6 picks to fill remaining starters)
-    const mustFillStarters = remainingPicks <= totalEmptyStarters;
+    // "Exclusive" starters = slots that can ONLY be filled by their specific position
+    // K slot → only K, DEF slot → only DEF, QB slot → only QB, etc.
+    // "Fungible" starters = FLEX (RB/WR/TE) and SFLEX (QB/RB/WR/TE) accept multiple positions
+    const exclusiveUnfilled = remQB + remRB + remWR + remTE + remK + remDEF;
 
-    if (!mustFillStarters && currentBenchCount < benchLimit) return [];
+    // TIER 1: Remaining picks ≤ exclusive unfilled starters
+    //   → Every pick MUST go toward an exclusive slot. No "wasting" a pick on a fungible slot.
+    //   Example: 3 picks left, need RB(1)+K(1)+DEF(1)+FLEX(1) = 4 starters.
+    //   Exclusive = 3 (RB+K+DEF). All 3 picks must fill exclusive slots → WR restricted.
+    if (remainingPicks <= exclusiveUnfilled) {
+      const restricted = [];
+      if (remQB === 0) restricted.push('QB');
+      if (remRB === 0) restricted.push('RB');
+      if (remWR === 0) restricted.push('WR');
+      if (remTE === 0) restricted.push('TE');
+      if (remK === 0) restricted.push('K');
+      if (remDEF === 0) restricted.push('DEF');
+      return restricted;
+    }
+
+    // TIER 2: Remaining picks ≤ total empty starters (but > exclusive)
+    //   → Enough picks for exclusive slots but not all starters. Allow fungible positions too.
+    if (remainingPicks <= totalEmptyStarters) {
+      const restricted = [];
+      if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
+      if (remRB === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('RB');
+      if (remWR === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('WR');
+      if (remTE === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('TE');
+      if (remK === 0) restricted.push('K');
+      if (remDEF === 0) restricted.push('DEF');
+      return restricted;
+    }
+
+    // TIER 3: Plenty of picks remaining — only restrict when bench is full
+    if (currentBenchCount < benchLimit) return [];
 
     const restricted = [];
     if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
