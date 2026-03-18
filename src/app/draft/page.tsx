@@ -158,9 +158,8 @@ function DraftRoomContent() {
     );
   }
 
-  const handleDraftPlayer = (playerId: string) => {
-    actions.makePick(playerId);
-  };
+  // actions.makePick is already stable (useCallback), use it directly
+  const handleDraftPlayer = actions.makePick;
 
   const handleLogout = () => {
     signOut({ callbackUrl: '/login' });
@@ -435,6 +434,7 @@ function DraftRoomContent() {
                 teamRosters={state.teamRosters}
                 currentTeamId={state.currentTeamId}
                 myTeamId={userTeam.id}
+                allPicks={state.allPicks}
               />
             </TabsContent>
 

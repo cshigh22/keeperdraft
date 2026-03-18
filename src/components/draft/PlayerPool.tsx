@@ -3,7 +3,8 @@
 
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useCallback } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -33,6 +34,7 @@ interface PlayerPoolProps {
     teamRosters?: Record<string, any[]>;
     currentTeamId?: string | null;
     myTeamId?: string | null;
+    allPicks?: any[];
 }
 
 type PositionFilter = 'ALL' | 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DST';
@@ -41,7 +43,7 @@ type PositionFilter = 'ALL' | 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DST';
 // POSITIONAL REQUIREMENT LOGIC
 // ============================================================================
 
-function getRestrictedPositions(roster: any[] = [], settings: any = {}) {
+function getRestrictedPositions(roster: any[] = [], settings: any = {}, remainingPicks: number = 999) {
     if (!settings) return [];
 
     const counts: Record<string, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
@@ -105,9 +107,13 @@ function getRestrictedPositions(roster: any[] = [], settings: any = {}) {
     // If no starters left, we are in "Bench mode" where positions are NOT restricted
     if (totalEmptyStarters === 0) return [];
 
-    // Rule: If bench is under the limit, you can draft any position.
-    // If bench is full, you MUST fulfill the remaining starting positions.
-    if (currentBenchCount < benchLimit) return [];
+    // KEY FIX: Restrict when remaining picks <= unfilled starters
+    // This prevents teams with many keepers from skipping required positions
+    const mustFillStarters = remainingPicks <= totalEmptyStarters;
+
+    // Rule: If bench is under the limit AND team has plenty of picks, draft freely.
+    // Otherwise, you MUST fulfill the remaining starting positions.
+    if (!mustFillStarters && currentBenchCount < benchLimit) return [];
 
     const restricted = [];
     if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
@@ -149,6 +155,7 @@ export function PlayerPool({
     teamRosters,
     currentTeamId,
     myTeamId,
+    allPicks,
 }: PlayerPoolProps) {
     const [search, setSearch] = useState('');
     const [positionFilter, setPositionFilter] = useState<PositionFilter>('ALL');
@@ -159,8 +166,12 @@ export function PlayerPool({
     const restrictedPositions = useMemo(() => {
         if (!myTeamId || !rosterSettings || !teamRosters) return [];
         const roster = teamRosters[myTeamId] || [];
-        return getRestrictedPositions(roster, rosterSettings);
-    }, [myTeamId, rosterSettings, teamRosters]);
+        // Count remaining picks for my team
+        const myRemainingPicks = allPicks
+            ? allPicks.filter(p => p.currentOwnerId === myTeamId && !p.isComplete).length
+            : 999;
+        return getRestrictedPositions(roster, rosterSettings, myRemainingPicks);
+    }, [myTeamId, rosterSettings, teamRosters, allPicks]);
 
     const isPositionRestricted = (pos: string) => {
         const targetPos = pos === 'DST' ? 'DEF' : pos;
@@ -328,17 +339,14 @@ export function PlayerPool({
                                     <p className="text-sm font-medium">No players found</p>
                                 </div>
                             ) : (
-                                filteredPlayers.map((player) => (
-                                    <PlayerRow
-                                        key={player.id}
-                                        player={player}
-                                        isMyTurn={isMyTurn}
-                                        onDraftPlayer={onDraftPlayer}
-                                        isFavorited={favorites.has(player.id)}
-                                        onToggleFavorite={toggleFavorite}
-                                        isRestricted={isPositionRestricted(player.position)}
-                                    />
-                                ))
+                                <VirtualizedPlayerList
+                                    players={filteredPlayers}
+                                    isMyTurn={isMyTurn}
+                                    onDraftPlayer={onDraftPlayer}
+                                    favorites={favorites}
+                                    onToggleFavorite={toggleFavorite}
+                                    isPositionRestricted={isPositionRestricted}
+                                />
                             )}
                         </>
                     ) : (
@@ -396,6 +404,80 @@ export function PlayerPool({
         </div>
     );
 }
+// ============================================================================
+// VIRTUALIZED PLAYER LIST
+// ============================================================================
+
+const ROW_HEIGHT = 52; // px per player row
+
+interface VirtualizedPlayerListProps {
+    players: PlayerSummary[];
+    isMyTurn: boolean;
+    onDraftPlayer: (playerId: string) => void;
+    favorites: Set<string>;
+    onToggleFavorite: (id: string, e: React.MouseEvent) => void;
+    isPositionRestricted: (pos: string) => boolean;
+}
+
+function VirtualizedPlayerList({
+    players,
+    isMyTurn,
+    onDraftPlayer,
+    favorites,
+    onToggleFavorite,
+    isPositionRestricted,
+}: VirtualizedPlayerListProps) {
+    const parentRef = useRef<HTMLDivElement>(null);
+
+    const virtualizer = useVirtualizer({
+        count: players.length,
+        getScrollElement: () => parentRef.current,
+        estimateSize: () => ROW_HEIGHT,
+        overscan: 10, // Render 10 extra rows above/below viewport for smooth scrolling
+    });
+
+    return (
+        <div
+            ref={parentRef}
+            style={{ height: '100%', overflow: 'auto' }}
+        >
+            <div
+                style={{
+                    height: `${virtualizer.getTotalSize()}px`,
+                    width: '100%',
+                    position: 'relative',
+                }}
+            >
+                {virtualizer.getVirtualItems().map((virtualRow) => {
+                    const player = players[virtualRow.index]!;
+                    return (
+                        <div
+                            key={player.id}
+                            style={{
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                width: '100%',
+                                height: `${virtualRow.size}px`,
+                                transform: `translateY(${virtualRow.start}px)`,
+                            }}
+                        >
+                            <PlayerRow
+                                player={player}
+                                isMyTurn={isMyTurn}
+                                onDraftPlayer={onDraftPlayer}
+                                isFavorited={favorites.has(player.id)}
+                                onToggleFavorite={onToggleFavorite}
+                                isRestricted={isPositionRestricted(player.position)}
+                            />
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 // ============================================================================
 // HELPER COMPONENTS
 // ============================================================================

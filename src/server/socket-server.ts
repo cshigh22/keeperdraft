@@ -310,18 +310,7 @@ io.on(SocketEvents.CONNECTION, (socket) => {
 
     try {
       const manager = getDraftManager(leagueId);
-
-      // Verify it's this team's turn (or commissioner forcing)
-      const canPick = await manager.canTeamPick(teamId, socket.data.isCommissioner);
-      if (!canPick) {
-        socket.emit(SocketEvents.ERROR, {
-          code: 'NOT_YOUR_TURN',
-          message: 'It is not your turn to pick',
-        });
-        return;
-      }
-
-      await manager.makePick(teamId, playerId);
+      await manager.makePick(teamId, playerId, socket.data.isCommissioner);
     } catch (error) {
       console.error('Error making pick:', error);
       socket.emit(SocketEvents.ERROR, {

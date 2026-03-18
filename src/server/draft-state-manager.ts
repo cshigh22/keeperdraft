@@ -818,7 +818,7 @@ export class DraftStateManager {
     return currentPick.currentOwnerId === teamId;
   }
 
-  async makePick(teamId: string, playerId: string): Promise<void> {
+  async makePick(teamId: string, playerId: string, isCommissioner: boolean = false): Promise<void> {
     // --- Phase 1: Parallel pre-validation ---
     const [state, settings] = await Promise.all([
       this.getCurrentState(),
@@ -826,6 +826,14 @@ export class DraftStateManager {
         where: { leagueId: this.leagueId },
       }),
     ]);
+
+    // Authorization check (inline — avoids separate canTeamPick DB queries)
+    if (state.status !== 'IN_PROGRESS') {
+      throw new Error('Draft is not in progress');
+    }
+    if (state.isPaused) {
+      throw new Error('Draft is paused');
+    }
 
     // Run independent validations in parallel
     const [isAvailable, currentPick, player, restrictedPositions] = await Promise.all([
@@ -851,6 +859,10 @@ export class DraftStateManager {
     }
     if (!currentPick) {
       throw new Error('No current pick found');
+    }
+    // Verify this team owns the pick (or commissioner override)
+    if (!isCommissioner && currentPick.currentOwnerId !== teamId) {
+      throw new Error('It is not your turn to pick');
     }
     if (!player) {
       throw new Error('Player not found');
@@ -1498,13 +1510,23 @@ export class DraftStateManager {
 
     if (!settings) return [];
 
-    const roster = await this.prisma.playerRoster.findMany({
-      where: {
-        leagueId: this.leagueId,
-        teamId: teamId,
-      },
-      include: { player: { select: { position: true } } },
-    });
+    // Fetch roster and remaining picks in parallel
+    const [roster, remainingPicks] = await Promise.all([
+      this.prisma.playerRoster.findMany({
+        where: {
+          leagueId: this.leagueId,
+          teamId: teamId,
+        },
+        include: { player: { select: { position: true } } },
+      }),
+      this.prisma.draftPick.count({
+        where: {
+          leagueId: this.leagueId,
+          currentOwnerId: teamId,
+          isComplete: false,
+        },
+      }),
+    ]);
 
     const counts: Record<string, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
     roster.forEach((r) => {
@@ -1576,8 +1598,16 @@ export class DraftStateManager {
     const currentBenchCount = leftQB + leftRB + leftWR + leftTE + leftK + leftDEF;
     const benchLimit = settings.benchCount || 0;
 
+    // If all starters are filled, no restrictions needed
     if (totalEmptyStarters === 0) return [];
-    if (currentBenchCount < benchLimit) return [];
+
+    // KEY FIX: Restrict positions when EITHER:
+    // 1. The bench is full (original logic), OR
+    // 2. The team has limited remaining picks — they MUST fill required starters
+    //    (e.g., 7 keepers + 6-round draft = only 6 picks to fill remaining starters)
+    const mustFillStarters = remainingPicks <= totalEmptyStarters;
+
+    if (!mustFillStarters && currentBenchCount < benchLimit) return [];
 
     const restricted = [];
     if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
