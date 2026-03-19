@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Users, Settings, Trophy, Play, ArrowLeft, Copy } from "lucide-react";
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
+import { EditableTeamName } from "@/components/league/EditableTeamName";
 
 export const dynamic = "force-dynamic";
 
@@ -151,7 +152,12 @@ export default async function LeagueDetailPage({
                                             {team.draftPosition}
                                         </div>
                                         <div>
-                                            <p className="font-medium text-sm">{team.name}</p>
+                                            <EditableTeamName 
+                                                teamId={team.id}
+                                                leagueId={league.id}
+                                                initialName={team.name}
+                                                isEditable={team.ownerId === session.user!.id || isCommissioner}
+                                            />
                                             <p className="text-xs text-muted-foreground">
                                                 {team.owner
                                                     ? team.owner.name || team.owner.email
