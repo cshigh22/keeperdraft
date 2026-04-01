@@ -243,7 +243,7 @@ export class DraftStateManager {
 
   async getTeamRoster(teamId: string): Promise<RosterPlayer[]> {
     const rosters = await this.prisma.playerRoster.findMany({
-      where: { leagueId: this.leagueId, teamId },
+      where: { leagueId: this.leagueId, teamId, acquiredVia: { not: 'FREE_AGENT' } },
       include: { player: true },
     });
 
@@ -317,7 +317,7 @@ export class DraftStateManager {
 
   private async getTeamRosters(): Promise<Record<string, RosterPlayer[]>> {
     const rosters = await this.prisma.playerRoster.findMany({
-      where: { leagueId: this.leagueId },
+      where: { leagueId: this.leagueId, acquiredVia: { not: 'FREE_AGENT' } },
       include: { player: true },
     });
 
@@ -345,8 +345,8 @@ export class DraftStateManager {
   }
 
   private async getAvailablePlayers(): Promise<PlayerSummary[]> {
-    // Get IDs of players to exclude (drafted or kept)
-    const [draftedPicks, keeperRosters] = await Promise.all([
+    // Get IDs of players to exclude (drafted OR on any roster)
+    const [draftedPicks, allRosteredPlayers] = await Promise.all([
       this.prisma.draftPick.findMany({
         where: {
           leagueId: this.leagueId,
@@ -358,27 +358,33 @@ export class DraftStateManager {
       this.prisma.playerRoster.findMany({
         where: {
           leagueId: this.leagueId,
-          isKeeper: true,
         },
-        select: { playerId: true, team: { select: { name: true } } },
+        select: { playerId: true, isKeeper: true, acquiredVia: true, team: { select: { name: true } } },
       }),
     ]);
 
-    const excludeIds = [
-      ...draftedPicks.map((p) => p.selectedPlayerId).filter((id): id is string => !!id),
-      ...keeperRosters.map((k) => k.playerId).filter((id): id is string => !!id),
-    ];
+    const excludeIds = new Set<string>();
 
-    const keeperMap = new Map<string, string>();
-    for (const k of keeperRosters) {
-      keeperMap.set(k.playerId, k.team.name);
+    // Exclude drafted players
+    for (const p of draftedPicks) {
+      if (p.selectedPlayerId) excludeIds.add(p.selectedPlayerId);
     }
 
-    // Exclude both drafted and kept players
+    // Exclude only keepers and draft-acquired players — not pre-draft marketplace entries (FREE_AGENT)
+    const keeperMap = new Map<string, string>();
+    for (const r of allRosteredPlayers) {
+      if (r.isKeeper || r.acquiredVia !== 'FREE_AGENT') {
+        excludeIds.add(r.playerId);
+      }
+      if (r.isKeeper) {
+        keeperMap.set(r.playerId, r.team.name);
+      }
+    }
+
     // Sort with nulls last so ranked players come before unranked ones
     const players = await this.prisma.player.findMany({
       where: {
-        id: { notIn: excludeIds },
+        id: { notIn: Array.from(excludeIds) },
       },
       orderBy: [
         { rank: { sort: 'asc', nulls: 'last' } },
@@ -482,19 +488,36 @@ export class DraftStateManager {
   }
 
   async updateQueue(teamId: string, playerIds: string[]): Promise<void> {
-    await this.prisma.draftQueue.deleteMany({
-      where: { teamId }
-    });
+    // Deduplicate on the way in
+    const uniquePlayerIds = Array.from(new Set(playerIds));
 
-    if (playerIds.length > 0) {
-      await this.prisma.draftQueue.createMany({
-        data: playerIds.map((playerId, index) => ({
-          teamId,
-          playerId,
-          rank: index
-        }))
-      });
-    }
+    // Use upsert loop instead of delete+create to be immune to race conditions.
+    // Two concurrent calls can safely upsert over each other without constraint errors.
+    await this.prisma.$transaction(async (tx) => {
+      // Upsert each player entry (update rank if exists, create if not)
+      for (let i = 0; i < uniquePlayerIds.length; i++) {
+        const playerId = uniquePlayerIds[i]!;
+        await tx.draftQueue.upsert({
+          where: {
+            teamId_playerId: { teamId, playerId },
+          },
+          update: { rank: i },
+          create: { teamId, playerId, rank: i },
+        });
+      }
+
+      // Remove any entries NOT in the updated list
+      if (uniquePlayerIds.length > 0) {
+        await tx.draftQueue.deleteMany({
+          where: {
+            teamId,
+            playerId: { notIn: uniquePlayerIds },
+          },
+        });
+      } else {
+        await tx.draftQueue.deleteMany({ where: { teamId } });
+      }
+    });
 
     const updatedQueue = await this.prisma.draftQueue.findMany({
       where: { teamId },
@@ -893,12 +916,20 @@ export class DraftStateManager {
         },
       });
 
-      // Add player to team roster
-      await tx.playerRoster.create({
-        data: {
+      // Add player to team roster (upsert in case a marketplace FREE_AGENT entry exists)
+      await tx.playerRoster.upsert({
+        where: {
+          leagueId_playerId: { leagueId: this.leagueId, playerId },
+        },
+        create: {
           teamId,
           playerId,
           leagueId: this.leagueId,
+          isKeeper: false,
+          acquiredVia: 'DRAFTED',
+        },
+        update: {
+          teamId,
           isKeeper: false,
           acquiredVia: 'DRAFTED',
         },
@@ -1107,12 +1138,13 @@ export class DraftStateManager {
 
     // Undo in transaction
     await this.prisma.$transaction(async (tx) => {
-      // Remove player from roster
+      // Remove drafted player from roster (only DRAFTED entries, not marketplace FREE_AGENT ones)
       await tx.playerRoster.deleteMany({
         where: {
           teamId: lastPick.currentOwnerId,
           playerId: lastPick.selectedPlayerId!,
           leagueId: this.leagueId,
+          acquiredVia: 'DRAFTED',
         },
       });
 
@@ -1220,11 +1252,12 @@ export class DraftStateManager {
         currentYear
       );
 
-      // 3. Delete all player rosters (except keepers)
+      // 3. Delete all player rosters (except keepers and marketplace FREE_AGENT entries)
       await tx.playerRoster.deleteMany({
         where: {
           leagueId: this.leagueId,
           isKeeper: false,
+          acquiredVia: { not: 'FREE_AGENT' },
         },
       });
 
@@ -1500,16 +1533,16 @@ export class DraftStateManager {
 
     if (drafted) return false;
 
-    // Check if kept
-    const kept = await this.prisma.playerRoster.findFirst({
+    // Check if already on any roster (keeper or drafted) — exclude marketplace FREE_AGENT entries
+    const rostered = await this.prisma.playerRoster.findFirst({
       where: {
         leagueId: this.leagueId,
         playerId,
-        isKeeper: true,
+        acquiredVia: { not: 'FREE_AGENT' },
       },
     });
 
-    return !kept;
+    return !rostered;
   }
 
   private async getRestrictedPositionsForTeam(teamId: string): Promise<string[]> {
@@ -1519,12 +1552,13 @@ export class DraftStateManager {
 
     if (!settings) return [];
 
-    // Fetch roster and remaining picks in parallel
+    // Fetch roster and remaining picks in parallel (exclude marketplace FREE_AGENT entries)
     const [roster, remainingPicks] = await Promise.all([
       this.prisma.playerRoster.findMany({
         where: {
           leagueId: this.leagueId,
           teamId: teamId,
+          acquiredVia: { not: 'FREE_AGENT' },
         },
         include: { player: { select: { position: true } } },
       }),

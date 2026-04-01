@@ -85,14 +85,17 @@ model League {
   sleeperId      String?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
-  draftPicks     DraftPick[]
-  draftSettings  DraftSettings?
-  draftState     DraftState?
-  commissioner   User           @relation("LeagueCommissioner", fields: [commissionerId], references: [id])
-  invites        LeagueInvite[]
-  members        LeagueMember[]
-  teams          Team[]
-  trades         Trade[]
+  draftPicks         DraftPick[]
+  draftSettings      DraftSettings?
+  draftState         DraftState?
+  commissioner       User              @relation("LeagueCommissioner", fields: [commissionerId], references: [id])
+  invites            LeagueInvite[]
+  members            LeagueMember[]
+  teams              Team[]
+  trades             Trade[]
+  pastWinners        PastWinner[]
+  tradeBlockEntries  TradeBlockEntry[]
+  rumors             LeagueRumor[]
 
   @@index([commissionerId])
   @@index([season])
@@ -118,17 +121,19 @@ model Team {
   leagueId        String
   draftPosition   Int?
   sleeperId       String?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-  ownedPicks      DraftPick[]    @relation("CurrentPickOwner")
-  originalPicks   DraftPick[]    @relation("OriginalPickOwner")
-  draftQueue      DraftQueue[]
-  players         PlayerRoster[]
-  league          League         @relation(fields: [leagueId], references: [id], onDelete: Cascade)
-  owner           User?          @relation(fields: [ownerId], references: [id])
-  tradesInitiated Trade[]        @relation("TradeInitiator")
-  tradesReceived  Trade[]        @relation("TradeReceiver")
-  tradeAssets     TradeAsset[]
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  tradeIntent        TradeIntent       @default(LISTENING)
+  ownedPicks         DraftPick[]       @relation("CurrentPickOwner")
+  originalPicks      DraftPick[]       @relation("OriginalPickOwner")
+  draftQueue         DraftQueue[]
+  players            PlayerRoster[]
+  league             League            @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  owner              User?             @relation(fields: [ownerId], references: [id])
+  tradesInitiated    Trade[]           @relation("TradeInitiator")
+  tradesReceived     Trade[]           @relation("TradeReceiver")
+  tradeAssets        TradeAsset[]
+  tradeBlockEntries  TradeBlockEntry[]
 
   @@unique([leagueId, draftPosition])
   @@index([leagueId])
@@ -154,9 +159,10 @@ model Player {
   byeWeek      Int?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
-  draftQueues  DraftQueue[]
-  rosters      PlayerRoster[]
-  tradeAssets  TradeAsset[]
+  draftQueues        DraftQueue[]
+  rosters            PlayerRoster[]
+  tradeAssets        TradeAsset[]
+  tradeBlockEntries  TradeBlockEntry[]
 
   @@index([position])
   @@index([nflTeam])
@@ -412,4 +418,71 @@ enum DraftActivityType {
   AUTO_PICK
   ORDER_UPDATED
   SETTINGS_CHANGED
+}
+
+enum TradeIntent {
+  FIRE_SALE
+  BUYING
+  LISTENING
+  NOT_TRADING
+}
+
+enum TradeBlockPhase {
+  PRE_DRAFT
+  DRAFT
+}
+
+// ============================================================================
+// HALL OF CHAMPIONS
+// ============================================================================
+
+model PastWinner {
+  id               String   @id @default(cuid())
+  leagueId         String
+  season           Int
+  managerName      String
+  teamName         String
+  keeperHighlights Json?    // [{ playerName, position, keeperRound }]
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  league           League   @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+
+  @@unique([leagueId, season])
+  @@index([leagueId])
+}
+
+// ============================================================================
+// TRADE BLOCK 2.0
+// ============================================================================
+
+model TradeBlockEntry {
+  id          String          @id @default(cuid())
+  teamId      String
+  leagueId    String
+  playerId    String?
+  phase       TradeBlockPhase @default(PRE_DRAFT)
+  draftCost   Int?            // Round the player was originally drafted/kept
+  askingPrice String?         // Free-text note like "Looking for WR1"
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  team        Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  league      League          @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  player      Player?         @relation(fields: [playerId], references: [id])
+
+  @@unique([teamId, playerId])
+  @@index([leagueId])
+  @@index([teamId])
+}
+
+model LeagueRumor {
+  id        String   @id @default(cuid())
+  leagueId  String
+  content   String
+  source    String?  // Anonymous tag like "League Insider"
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  league    League   @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+
+  @@index([leagueId])
+  @@index([createdAt])
 }

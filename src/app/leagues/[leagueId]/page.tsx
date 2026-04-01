@@ -6,9 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Users, Settings, Trophy, Play, ArrowLeft, Copy } from "lucide-react";
+import { Users, Settings, Trophy, Play, ArrowLeft } from "lucide-react";
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
 import { EditableTeamName } from "@/components/league/EditableTeamName";
+import { LegacyVault } from "@/components/champions/LegacyVault";
+import { Marketplace } from "@/components/marketplace/Marketplace";
+import type { PastWinnerData, KeeperHighlight } from "@/types/champions";
+import type { TradeBlockPlayerData } from "@/types/marketplace";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +26,10 @@ export default async function LeagueDetailPage({
         redirect("/login");
     }
 
+    // ========================================================================
+    // DATA FETCHING
+    // ========================================================================
+
     const league = await prisma.league.findUnique({
         where: { id: params.leagueId },
         include: {
@@ -33,6 +41,19 @@ export default async function LeagueDetailPage({
                     owner: {
                         select: { name: true, email: true, image: true },
                     },
+                    players: {
+                        include: {
+                            player: {
+                                select: {
+                                    id: true,
+                                    fullName: true,
+                                    position: true,
+                                    nflTeam: true,
+                                    rank: true,
+                                },
+                            },
+                        },
+                    },
                 },
             },
             members: {
@@ -41,6 +62,10 @@ export default async function LeagueDetailPage({
                         select: { name: true, email: true },
                     },
                 },
+            },
+            // Hall of Champions data
+            pastWinners: {
+                orderBy: { season: "desc" },
             },
         },
     });
@@ -60,6 +85,163 @@ export default async function LeagueDetailPage({
     const isCommissioner = league.commissionerId === session.user.id;
     const filledTeams = league.teams.filter((t) => t.ownerId !== null);
     const draftStatus = league.draftState?.status ?? "NOT_STARTED";
+
+    // Find user's team in this league
+    const myTeam = league.teams.find((t) => t.ownerId === session.user!.id);
+    const myTeamId = myTeam?.id ?? null;
+
+    // ========================================================================
+    // TRADE BLOCK DATA
+    // ========================================================================
+
+    const tradeBlockEntries = await prisma.tradeBlockEntry.findMany({
+        where: { leagueId: params.leagueId, phase: 'PRE_DRAFT' },
+        include: {
+            player: {
+                select: {
+                    id: true,
+                    fullName: true,
+                    position: true,
+                    nflTeam: true,
+                    rank: true,
+                    adp: true,
+                    avatarUrl: true,
+                },
+            },
+            team: {
+                select: {
+                    id: true,
+                    name: true,
+                    tradeIntent: true,
+                    owner: {
+                        select: { name: true },
+                    },
+                },
+            },
+        },
+        orderBy: { createdAt: "desc" },
+    });
+
+    // Get my team's roster for the "My Status" tab
+    let myPlayers: {
+        id: string;
+        entryId: string;
+        fullName: string;
+        position: string;
+        nflTeam: string | null;
+        rank: number | null;
+        isKeeper: boolean;
+        isOnBlock: boolean;
+        draftCost: number | null;
+    }[] = [];
+
+    if (myTeamId) {
+        const myTeamFull = league.teams.find((t) => t.id === myTeamId);
+        const rosterEntries = myTeamFull?.players ?? [];
+
+        const myBlockedPlayerIds = new Set(
+            tradeBlockEntries
+                .filter((e) => e.teamId === myTeamId)
+                .map((e) => e.playerId)
+        );
+
+        myPlayers = rosterEntries.map((r) => ({
+            id: r.player.id,
+            entryId: r.id,
+            fullName: r.player.fullName,
+            position: r.player.position,
+            nflTeam: r.player.nflTeam,
+            rank: r.player.rank,
+            isKeeper: r.isKeeper,
+            isOnBlock: myBlockedPlayerIds.has(r.player.id),
+            draftCost: r.keeperRound ?? null,
+        }));
+    }
+
+    // ========================================================================
+    // ALL LEAGUE ROSTERS (for browsing)
+    // ========================================================================
+
+    const blockedPlayerIdsByTeam = new Map<string, Set<string>>();
+    tradeBlockEntries.forEach((e) => {
+        if (!blockedPlayerIdsByTeam.has(e.teamId)) {
+            blockedPlayerIdsByTeam.set(e.teamId, new Set());
+        }
+        blockedPlayerIdsByTeam.get(e.teamId)!.add(e.playerId!);
+    });
+
+    const allLeagueRosters: import("@/types/marketplace").GeneralRosterPlayer[] = [];
+    league.teams.forEach((team) => {
+        const teamBlockedIds = blockedPlayerIdsByTeam.get(team.id) || new Set();
+        team.players.forEach((r) => {
+            allLeagueRosters.push({
+                id: r.player.id,
+                entryId: r.id,
+                fullName: r.player.fullName,
+                position: r.player.position,
+                nflTeam: r.player.nflTeam,
+                rank: r.player.rank,
+                isKeeper: r.isKeeper,
+                isOnBlock: teamBlockedIds.has(r.player.id),
+                draftCost: r.keeperRound ?? null,
+                teamId: team.id,
+                teamName: team.name,
+            });
+        });
+    });
+
+
+
+    // ========================================================================
+    // SERIALIZE DATA FOR CLIENT COMPONENTS
+    // ========================================================================
+
+    const pastWinnersData: PastWinnerData[] = league.pastWinners.map((w) => ({
+        id: w.id,
+        leagueId: w.leagueId,
+        season: w.season,
+        managerName: w.managerName,
+        teamName: w.teamName,
+        keeperHighlights: (w.keeperHighlights as KeeperHighlight[] | null) ?? null,
+        createdAt: w.createdAt.toISOString(),
+        updatedAt: w.updatedAt.toISOString(),
+    }));
+
+    const tradeBlockData: TradeBlockPlayerData[] = tradeBlockEntries.map((e) => ({
+        id: e.id,
+        teamId: e.teamId,
+        leagueId: e.leagueId,
+        playerId: e.playerId,
+        draftCost: e.draftCost,
+        askingPrice: e.askingPrice,
+        phase: e.phase,
+        createdAt: e.createdAt.toISOString(),
+        updatedAt: e.updatedAt.toISOString(),
+        player: e.player
+            ? {
+                  id: e.player.id,
+                  fullName: e.player.fullName,
+                  position: e.player.position,
+                  nflTeam: e.player.nflTeam,
+                  rank: e.player.rank,
+                  adp: e.player.adp,
+                  avatarUrl: e.player.avatarUrl,
+              }
+            : null,
+        team: {
+            id: e.team.id,
+            name: e.team.name,
+            tradeIntent: e.team.tradeIntent,
+            owner: e.team.owner,
+        },
+    }));
+
+    const totalRounds = league.draftSettings?.totalRounds ?? 14;
+    const totalPlayers = league.maxTeams * totalRounds;
+
+    // ========================================================================
+    // RENDER
+    // ========================================================================
 
     return (
         <div className="container mx-auto py-10 px-4">
@@ -82,6 +264,15 @@ export default async function LeagueDetailPage({
             </div>
 
             <Separator className="my-6" />
+
+            {/* ================================================================
+                HALL OF CHAMPIONS
+                ================================================================ */}
+            <LegacyVault
+                leagueId={league.id}
+                pastWinners={pastWinnersData}
+                isCommissioner={isCommissioner}
+            />
 
             {/* Actions */}
             <div className="flex flex-wrap gap-3 mb-8">
@@ -261,6 +452,21 @@ export default async function LeagueDetailPage({
                     </Card>
                 )}
             </div>
+
+            {/* ================================================================
+                TRADE BLOCK 2.0
+                ================================================================ */}
+            <Marketplace
+                leagueId={league.id}
+                myTeamId={myTeamId}
+
+                tradeBlockEntries={tradeBlockData}
+                myPlayers={myPlayers}
+                leagueRosters={allLeagueRosters}
+                isCommissioner={isCommissioner}
+                totalRounds={totalRounds}
+                totalPlayers={totalPlayers}
+            />
         </div>
     );
 }
