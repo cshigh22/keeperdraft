@@ -43,23 +43,6 @@ export async function updateTradeIntent(formData: FormData) {
     data: { tradeIntent: intent },
   });
 
-  // Auto-generate rumor on intent change
-  const intentLabels: Record<TradeIntent, string> = {
-    FIRE_SALE: 'is running a fire sale 🔥',
-    BUYING: 'is looking to buy 💰',
-    LISTENING: 'is open to proposals 👂',
-    NOT_TRADING: 'has locked their roster 🔒',
-  };
-
-  await prisma.leagueRumor.create({
-    data: {
-      leagueId: team.leagueId,
-      content: `${team.name} ${intentLabels[intent]}`,
-      source: 'Front Office Sources',
-      isSystem: true,
-    },
-  });
-
   revalidatePath(`/leagues/${team.leagueId}`);
   return { success: true };
 }
@@ -96,12 +79,6 @@ export async function addToTradeBlock(formData: FormData) {
     throw new Error('Unauthorized');
   }
 
-  // Get player name for rumor
-  const player = await prisma.player.findUnique({
-    where: { id: playerId },
-    select: { fullName: true },
-  });
-
   await prisma.tradeBlockEntry.upsert({
     where: { teamId_playerId: { teamId, playerId } },
     create: {
@@ -118,18 +95,6 @@ export async function addToTradeBlock(formData: FormData) {
       phase,
     },
   });
-
-  // Auto rumor
-  if (player) {
-    await prisma.leagueRumor.create({
-      data: {
-        leagueId: team.leagueId,
-        content: `${player.fullName} has been placed on the trade block by ${team.name}`,
-        source: 'League Insider',
-        isSystem: true,
-      },
-    });
-  }
 
   revalidatePath(`/leagues/${team.leagueId}`);
   return { success: true };
@@ -164,39 +129,3 @@ export async function removeFromTradeBlock(formData: FormData) {
   return { success: true };
 }
 
-// ============================================================================
-// POST LEAGUE RUMOR
-// ============================================================================
-
-export async function postLeagueRumor(formData: FormData) {
-  const session = await auth();
-  if (!session?.user?.id) throw new Error('Unauthorized');
-
-  const leagueId = formData.get('leagueId') as string;
-  const content = formData.get('content') as string;
-  const source = (formData.get('source') as string) || 'Anonymous';
-
-  if (!leagueId || !content) throw new Error('Missing required fields');
-
-  // Only commissioner can post manual rumors
-  const league = await prisma.league.findUnique({
-    where: { id: leagueId },
-    select: { commissionerId: true },
-  });
-
-  if (league?.commissionerId !== session.user.id) {
-    throw new Error('Only the commissioner can post rumors');
-  }
-
-  await prisma.leagueRumor.create({
-    data: {
-      leagueId,
-      content,
-      source,
-      isSystem: false,
-    },
-  });
-
-  revalidatePath(`/leagues/${leagueId}`);
-  return { success: true };
-}

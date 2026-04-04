@@ -58,11 +58,10 @@ Trades can happen globally (outside of draft) via `GlobalTradeNotifier` and `use
 | `TradeAsset` | Players or picks in a trade |
 | `TradeBlockEntry` | Public trade availability signal per phase (PRE_DRAFT/DRAFT) |
 | `PastWinner` | Hall of Champions records per season |
-| `LeagueRumor` | Rumor mill entries for the Marketplace tab |
 
 ### Pages & components
 
-- `/leagues/[leagueId]` — League dashboard: Hall of Champions, Marketplace (trade block + rumors), settings
+- `/leagues/[leagueId]` — League dashboard: Hall of Champions, Marketplace (trade block), settings
 - `/leagues/[leagueId]/keepers` — Keeper selection UI
 - `/draft` — Main draft room: `DraftBoard`, `PlayerPool`, `PlayerQueue`, `DraftTimer`, `SidebarRoster`, `TeamRosters`, `TradeModal`
 

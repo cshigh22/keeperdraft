@@ -95,7 +95,6 @@ model League {
   trades             Trade[]
   pastWinners        PastWinner[]
   tradeBlockEntries  TradeBlockEntry[]
-  rumors             LeagueRumor[]
 
   @@index([commissionerId])
   @@index([season])
@@ -474,15 +473,3 @@ model TradeBlockEntry {
   @@index([teamId])
 }
 
-model LeagueRumor {
-  id        String   @id @default(cuid())
-  leagueId  String
-  content   String
-  source    String?  // Anonymous tag like "League Insider"
-  isSystem  Boolean  @default(false)
-  createdAt DateTime @default(now())
-  league    League   @relation(fields: [leagueId], references: [id], onDelete: Cascade)
-
-  @@index([leagueId])
-  @@index([createdAt])
-}

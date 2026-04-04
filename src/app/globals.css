@@ -199,23 +199,6 @@
 }
 
 /* ============================================================================
-   RUMOR MILL TICKER
-   ============================================================================ */
-
-@keyframes ticker-scroll {
-  0% { transform: translateY(0); }
-  100% { transform: translateY(-50%); }
-}
-
-.ticker-scroll {
-  animation: ticker-scroll var(--ticker-duration, 30s) linear infinite;
-}
-
-.ticker-scroll:hover {
-  animation-play-state: paused;
-}
-
-/* ============================================================================
    ROI METER BAR
    ============================================================================ */
 

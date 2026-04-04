@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useTransition, useMemo } from 'react';
+import React, { useState, useTransition, useEffect, useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -91,6 +91,12 @@ export function Marketplace({
   // Error state
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!error) return;
+    const timer = setTimeout(() => setError(null), 5000);
+    return () => clearTimeout(timer);
+  }, [error]);
+
   const handleSearch = async (query: string) => {
     setSearchQuery(query);
     if (query.length < 2) {
@@ -120,7 +126,7 @@ export function Marketplace({
         setSearchQuery('');
         setSearchResults([]);
       } catch (err) {
-        setError('Failed to add player to roster. Please try again.');
+        setError(err instanceof Error ? err.message : 'Failed to add player to roster.');
       }
     });
   };
@@ -144,7 +150,7 @@ export function Marketplace({
       try {
         await removePlayerFromRoster(formData);
       } catch (err) {
-        setError('Failed to remove player from roster. Please try again.');
+        setError(err instanceof Error ? err.message : 'Failed to remove player from roster.');
       }
     });
   };

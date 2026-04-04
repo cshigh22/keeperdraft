@@ -49,16 +49,6 @@ export interface GeneralRosterPlayer {
   teamName: string;
 }
 
-export interface RumorData {
-  id: string;
-  leagueId: string;
-  content: string;
-  source: string | null;
-  isSystem: boolean;
-  createdAt: string;
-}
-
-
 
 export interface ROIResult {
   label: string;
