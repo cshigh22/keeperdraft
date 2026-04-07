@@ -303,7 +303,7 @@ function CommissionerDashboardContent() {
                     variant="outline"
                     onClick={async () => {
                       setRankingUpdateStatus({ loading: true, result: null });
-                      const result = await updatePlayerRankingsAction();
+                      const result = await updatePlayerRankingsAction(leagueId);
                       setRankingUpdateStatus({ loading: false, result });
                     }}
                     disabled={rankingUpdateStatus.loading}

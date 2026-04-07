@@ -1,11 +1,33 @@
 'use server';
 
+import { auth } from '@/auth';
+import { prisma } from '@/lib/prisma';
 import { CommissionerService, DraftSettingsInput } from '@/services/commissioner.service';
 import { updateRankingsFromFantasyCalc } from '@/lib/fantasycalc-api';
 import { revalidateLeague } from './league';
 
+async function requireCommissioner(leagueId: string) {
+    const session = await auth();
+    if (!session?.user?.id) throw new Error('Unauthorized');
+
+    const league = await prisma.league.findUnique({
+        where: { id: leagueId },
+        select: { commissionerId: true },
+    });
+
+    if (!league) throw new Error('League not found');
+    if (league.commissionerId !== session.user.id) {
+        throw new Error('Only the commissioner can perform this action');
+    }
+
+    return session;
+}
+
 export async function updateDraftSettingsAction(input: any) {
     try {
+        if (!input.leagueId) return { success: false, error: 'Missing leagueId' };
+        await requireCommissioner(input.leagueId);
+
         // Convert string dates if necessary (e.g. from JSON)
         const settings: DraftSettingsInput = { ...input };
 
@@ -17,9 +39,7 @@ export async function updateDraftSettingsAction(input: any) {
         }
 
         await CommissionerService.updateDraftSettings(settings);
-        if (input.leagueId) {
-            await revalidateLeague(input.leagueId);
-        }
+        await revalidateLeague(input.leagueId);
         return { success: true };
     } catch (error: any) {
         console.error('Failed to update draft settings:', error);
@@ -29,6 +49,7 @@ export async function updateDraftSettingsAction(input: any) {
 
 export async function setDraftOrderAction(leagueId: string, teamOrderList: string[]) {
     try {
+        await requireCommissioner(leagueId);
         const result = await CommissionerService.setDraftOrder({ leagueId, teamOrderList });
         await revalidateLeague(leagueId);
         return { success: true, data: result };
@@ -40,6 +61,7 @@ export async function setDraftOrderAction(leagueId: string, teamOrderList: strin
 
 export async function randomizeDraftOrderAction(leagueId: string) {
     try {
+        await requireCommissioner(leagueId);
         const result = await CommissionerService.randomizeDraftOrder(leagueId);
         await revalidateLeague(leagueId);
         return { success: true, data: result };
@@ -51,6 +73,7 @@ export async function randomizeDraftOrderAction(leagueId: string) {
 
 export async function manuallyAssignPickOwnerAction(leagueId: string, pickId: string, newOwnerId: string) {
     try {
+        await requireCommissioner(leagueId);
         await CommissionerService.manuallyAssignPickOwner(leagueId, pickId, newOwnerId);
         return { success: true };
     } catch (error: any) {
@@ -61,6 +84,9 @@ export async function manuallyAssignPickOwnerAction(leagueId: string, pickId: st
 
 export async function getDraftSettingsAction(leagueId: string) {
     try {
+        const session = await auth();
+        if (!session?.user?.id) throw new Error('Unauthorized');
+
         const settings = await CommissionerService.getDraftSettings(leagueId);
         return { success: true, data: settings };
     } catch (error: any) {
@@ -69,8 +95,9 @@ export async function getDraftSettingsAction(leagueId: string) {
     }
 }
 
-export async function updatePlayerRankingsAction() {
+export async function updatePlayerRankingsAction(leagueId: string) {
     try {
+        await requireCommissioner(leagueId);
         const result = await updateRankingsFromFantasyCalc(false, 1, 12);
         return {
             success: result.success,

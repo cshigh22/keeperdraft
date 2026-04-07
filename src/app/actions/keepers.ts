@@ -1,19 +1,41 @@
 'use server';
 
+import { auth } from '@/auth';
+import { prisma } from '@/lib/prisma';
 import { KeeperService, KeeperSelection } from '@/services/keeper.service';
 import { revalidateLeague } from './league';
 
-// Assuming mock session or actual session
-// If using mock session from client, we need to pass userId. 
-// But ideally server actions should verify session.
-// For now, let's accept userId/teamId as arguments, but in prod we'd get them from session.
-// Wait, the existing code uses a mock session on the client.
-// So let's accept teamId and leagueId.
-
 const keeperService = new KeeperService();
+
+async function requireTeamAccess(teamId: string, leagueId: string) {
+    const session = await auth();
+    if (!session?.user?.id) throw new Error('Unauthorized');
+
+    const team = await prisma.team.findUnique({
+        where: { id: teamId },
+        select: { ownerId: true, leagueId: true },
+    });
+
+    if (!team || team.leagueId !== leagueId) throw new Error('Team not found');
+
+    const league = await prisma.league.findUnique({
+        where: { id: leagueId },
+        select: { commissionerId: true },
+    });
+
+    const isOwner = team.ownerId === session.user.id;
+    const isCommissioner = league?.commissionerId === session.user.id;
+
+    if (!isOwner && !isCommissioner) {
+        throw new Error('Unauthorized to access this team');
+    }
+
+    return session;
+}
 
 export async function getPotentialKeepers(teamId: string, leagueId: string) {
     try {
+        await requireTeamAccess(teamId, leagueId);
         const keepers = await keeperService.getPotentialKeepers(teamId, leagueId);
         return { success: true, data: keepers };
     } catch (error: any) {
@@ -24,6 +46,7 @@ export async function getPotentialKeepers(teamId: string, leagueId: string) {
 
 export async function saveKeepers(teamId: string, leagueId: string, selections: KeeperSelection[]) {
     try {
+        await requireTeamAccess(teamId, leagueId);
         await keeperService.saveKeepers(teamId, leagueId, selections);
         await revalidateLeague(leagueId);
         return { success: true };
