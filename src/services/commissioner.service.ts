@@ -2,7 +2,12 @@
 // "God Mode" controls for league commissioners
 
 import { prisma } from '@/lib/prisma';
-import type { DraftType } from '@prisma/client';
+import type {
+  DraftActivityLog,
+  DraftActivityType,
+  DraftType,
+  Prisma,
+} from '@prisma/client';
 
 // ============================================================================
 // TYPES
@@ -45,11 +50,120 @@ export interface DraftSettingsInput {
   scheduledStartTime?: Date;
 }
 
-interface GeneratePicksResult {
-  success: boolean;
-  totalPicks: number;
-  rounds: number;
-  teams: number;
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+const DEFAULT_TOTAL_ROUNDS = 15;
+const DEFAULT_MAX_KEEPERS = 3;
+
+// Settings that would invalidate existing picks/keepers once the draft has started
+const LOCKED_AFTER_START: readonly (keyof Omit<DraftSettingsInput, 'leagueId'>)[] = [
+  'draftType',
+  'totalRounds',
+  'maxKeepers',
+];
+
+async function logActivity(
+  leagueId: string,
+  activityType: DraftActivityType,
+  description: string,
+  extra: Partial<Prisma.DraftActivityLogUncheckedCreateInput> = {}
+): Promise<void> {
+  await prisma.draftActivityLog.create({
+    data: { leagueId, activityType, description, ...extra },
+  });
+}
+
+// Fisher-Yates shuffle (returns a new array)
+function shuffle<T>(items: readonly T[]): T[] {
+  const shuffled = [...items];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
+  }
+  return shuffled;
+}
+
+// Team pick order for a given round, based on draft type
+function buildRoundOrder(draftType: DraftType, round: number, teamOrder: string[]): string[] {
+  switch (draftType) {
+    case 'SNAKE':
+      return round % 2 === 0 ? [...teamOrder].reverse() : teamOrder;
+    case 'LINEAR':
+      return teamOrder;
+    case 'THIRD_ROUND_REVERSAL': {
+      const cycle = Math.floor((round - 1) / 2) % 2;
+      const isReversedRound = round > 1 && (round === 2 || round === 3 || cycle === 1);
+      return isReversedRound ? [...teamOrder].reverse() : teamOrder;
+    }
+    default:
+      return teamOrder;
+  }
+}
+
+interface RegeneratePicksParams {
+  leagueId: string;
+  season: number;
+  teamOrderList: string[];
+  totalRounds: number;
+  draftType: DraftType;
+  // "round:originalOwnerId" -> currentOwnerId, for picks that were traded
+  tradeMap: Map<string, string>;
+}
+
+// Upserts every pick slot for the new order. Uses upsert (not delete+create) so
+// existing pick IDs survive — TradeAssets reference them.
+async function regenerateDraftPicks(
+  tx: Prisma.TransactionClient,
+  { leagueId, season, teamOrderList, totalRounds, draftType, tradeMap }: RegeneratePicksParams
+): Promise<number> {
+  let picksUpdated = 0;
+
+  for (let round = 1; round <= totalRounds; round++) {
+    const orderForRound = buildRoundOrder(draftType, round, teamOrderList);
+
+    for (const [index, teamId] of orderForRound.entries()) {
+      const pickInRound = index + 1;
+      const overallPickNumber = (round - 1) * teamOrderList.length + pickInRound;
+
+      // If this team's pick in this round was previously traded, the trade
+      // follows the team
+      const currentOwnerId = tradeMap.get(`${round}:${teamId}`) || teamId;
+
+      await tx.draftPick.upsert({
+        where: {
+          leagueId_season_round_pickInRound: { leagueId, season, round, pickInRound },
+        },
+        update: {
+          originalOwnerId: teamId,
+          currentOwnerId,
+          overallPickNumber,
+        },
+        create: {
+          leagueId,
+          season,
+          round,
+          pickInRound,
+          overallPickNumber,
+          originalOwnerId: teamId,
+          currentOwnerId,
+        },
+      });
+      picksUpdated++;
+    }
+  }
+
+  // Clean up any extra picks if the number of teams or rounds decreased
+  await tx.draftPick.deleteMany({
+    where: {
+      leagueId,
+      season,
+      OR: [{ round: { gt: totalRounds } }, { pickInRound: { gt: teamOrderList.length } }],
+    },
+  });
+
+  return picksUpdated;
 }
 
 // ============================================================================
@@ -64,10 +178,10 @@ export const CommissionerService = {
   /**
    * Set the draft order for a league.
    * This is the primary method for commissioners to establish or modify the draft order.
-   * 
+   *
    * @param input - Contains leagueId and ordered array of team IDs
    * @returns Result with updated teams and generated picks count
-   * 
+   *
    * @example
    * await CommissionerService.setDraftOrder({
    *   leagueId: 'league-123',
@@ -77,7 +191,6 @@ export const CommissionerService = {
   async setDraftOrder(input: SetDraftOrderInput): Promise<SetDraftOrderResult> {
     const { leagueId, teamOrderList } = input;
 
-    // Validate league exists and get current state
     const league = await prisma.league.findUnique({
       where: { id: leagueId },
       include: {
@@ -91,37 +204,33 @@ export const CommissionerService = {
       throw new Error('League not found');
     }
 
-    // Validate draft hasn't started (or is paused)
+    // Order can only change before the draft or while it is paused
     if (league.draftState?.status === 'IN_PROGRESS' && !league.draftState.isPaused) {
-      throw new Error('Cannot change draft order while draft is in progress. Pause the draft first.');
+      throw new Error(
+        'Cannot change draft order while draft is in progress. Pause the draft first.'
+      );
     }
-
     if (league.draftState?.status === 'COMPLETED') {
       throw new Error('Cannot change draft order - draft has already completed');
     }
 
-    // Validate all teams in the order belong to this league
+    // The order list must be exactly the league's teams, once each
     const leagueTeamIds = new Set(league.teams.map((t) => t.id));
     for (const teamId of teamOrderList) {
       if (!leagueTeamIds.has(teamId)) {
         throw new Error(`Team ${teamId} is not part of this league`);
       }
     }
-
-    // Validate no duplicates
     if (new Set(teamOrderList).size !== teamOrderList.length) {
       throw new Error('Duplicate teams in order list');
     }
-
-    // Validate all teams are included
     if (teamOrderList.length !== league.teams.length) {
       throw new Error(`Order list must include all ${league.teams.length} teams`);
     }
 
-    // Update team positions and generate picks in a transaction
     const result = await prisma.$transaction(async (tx) => {
-      // 1. Capture current ownership state for traded picks
-      // This allows trades to "follow the team" when the draft order changes
+      // 1. Capture current ownership state for traded picks, so trades can
+      // "follow the team" when the draft order changes
       const currentPicks = await tx.draftPick.findMany({
         where: { leagueId },
         select: {
@@ -131,8 +240,6 @@ export const CommissionerService = {
         },
       });
 
-      // Map: "round:originalOwnerId" -> currentOwnerId
-      // Only store if the pick was traded (current != original)
       const tradeMap = new Map<string, string>();
       for (const pick of currentPicks) {
         if (pick.currentOwnerId !== pick.originalOwnerId) {
@@ -148,137 +255,48 @@ export const CommissionerService = {
       });
 
       // 3. Update each team's draft position
-      const updatedTeams = [];
-      for (let i = 0; i < teamOrderList.length; i++) {
-        const teamId = teamOrderList[i];
-        if (!teamId) continue;
-
+      const updatedTeams: SetDraftOrderResult['teams'] = [];
+      for (const [index, teamId] of teamOrderList.entries()) {
         const team = await tx.team.update({
           where: { id: teamId },
-          data: { draftPosition: i + 1 },
+          data: { draftPosition: index + 1 },
           include: { owner: { select: { name: true } } },
         });
 
         updatedTeams.push({
           id: team.id,
           name: team.name,
-          draftPosition: i + 1,
+          draftPosition: index + 1,
           ownerName: team.owner?.name ?? 'No Owner',
         });
       }
 
-      // 4. Update or Generate draft picks (if draft hasn't started)
-      if (!league.draftState || league.draftState.status === 'NOT_STARTED') {
-        const settings = league.draftSettings;
-        const totalRounds = settings?.totalRounds || 15;
-        const draftType = settings?.draftType || 'SNAKE';
-        const season = league.season;
-
-        if (totalRounds < 1) {
-          throw new Error('Total rounds must be at least 1');
-        }
-
-        // We'll update picks round by round
-        let picksUpdated = 0;
-
-        for (let round = 1; round <= totalRounds; round++) {
-          // Determine order for this round based on draft type
-          let orderForRound: string[];
-
-          switch (draftType) {
-            case 'SNAKE':
-              orderForRound = round % 2 === 0
-                ? [...teamOrderList].reverse()
-                : teamOrderList;
-              break;
-            case 'LINEAR':
-              orderForRound = teamOrderList;
-              break;
-            case 'THIRD_ROUND_REVERSAL':
-              const cycle = Math.floor((round - 1) / 2) % 2;
-              const isReversedRound = round > 1 && (round === 2 || round === 3 || cycle === 1);
-              orderForRound = isReversedRound
-                ? [...teamOrderList].reverse()
-                : teamOrderList;
-              break;
-            default:
-              orderForRound = teamOrderList;
-          }
-
-          for (let pickInRound = 1; pickInRound <= teamOrderList.length; pickInRound++) {
-            const teamId = orderForRound[pickInRound - 1];
-            if (!teamId) continue;
-
-            const overallPickNumber = (round - 1) * teamOrderList.length + pickInRound;
-
-            // Check if this team's pick in this round was previously traded
-            // The trade follows the team
-            const currentOwnerId = tradeMap.get(`${round}:${teamId}`) || teamId;
-
-            // Use upsert to avoid duplicate key errors if some picks already exist
-            // but we need to change their properties
-            await tx.draftPick.upsert({
-              where: {
-                leagueId_season_round_pickInRound: {
-                  leagueId,
-                  season,
-                  round,
-                  pickInRound,
-                },
-              },
-              update: {
-                originalOwnerId: teamId,
-                currentOwnerId: currentOwnerId,
-                overallPickNumber: overallPickNumber,
-              },
-              create: {
-                leagueId,
-                season,
-                round,
-                pickInRound,
-                overallPickNumber: overallPickNumber,
-                originalOwnerId: teamId,
-                currentOwnerId: currentOwnerId,
-              },
-            });
-            picksUpdated++;
-          }
-        }
-
-        // Clean up any extra picks if the number of teams or rounds decreased
-        await tx.draftPick.deleteMany({
-          where: {
-            leagueId,
-            season,
-            OR: [
-              { round: { gt: totalRounds } },
-              { pickInRound: { gt: teamOrderList.length } },
-            ],
-          },
-        });
-
-        return {
-          teams: updatedTeams,
-          picksGenerated: picksUpdated,
-        };
+      // 4. Regenerate draft picks (only if draft hasn't started)
+      if (league.draftState && league.draftState.status !== 'NOT_STARTED') {
+        return { teams: updatedTeams, picksGenerated: 0 };
       }
 
-      return {
-        teams: updatedTeams,
-        picksGenerated: 0,
-      };
+      const totalRounds = league.draftSettings?.totalRounds || DEFAULT_TOTAL_ROUNDS;
+      if (totalRounds < 1) {
+        throw new Error('Total rounds must be at least 1');
+      }
+
+      const picksGenerated = await regenerateDraftPicks(tx, {
+        leagueId,
+        season: league.season,
+        teamOrderList,
+        totalRounds,
+        draftType: league.draftSettings?.draftType || 'SNAKE',
+        tradeMap,
+      });
+
+      return { teams: updatedTeams, picksGenerated };
     });
 
-    // Log the activity
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'ORDER_UPDATED',
-        description: 'Draft order set by commissioner',
-        metadata: {
-          newOrder: teamOrderList,
-          picksGenerated: result.picksGenerated,
-        },
+    await logActivity(leagueId, 'ORDER_UPDATED', 'Draft order set by commissioner', {
+      metadata: {
+        newOrder: teamOrderList,
+        picksGenerated: result.picksGenerated,
       },
     });
 
@@ -302,20 +320,9 @@ export const CommissionerService = {
       throw new Error('League not found');
     }
 
-    // Fisher-Yates shuffle
-    const teamIds = league.teams.map((t) => t.id);
-    for (let i = teamIds.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      const temp = teamIds[i];
-      if (temp !== undefined) {
-        teamIds[i] = teamIds[j]!;
-        teamIds[j] = temp;
-      }
-    }
-
     return this.setDraftOrder({
       leagueId,
-      teamOrderList: teamIds,
+      teamOrderList: shuffle(league.teams.map((t) => t.id)),
     });
   },
 
@@ -329,7 +336,6 @@ export const CommissionerService = {
   async updateDraftSettings(input: DraftSettingsInput): Promise<void> {
     const { leagueId, ...settings } = input;
 
-    // Validate league and check draft status
     const league = await prisma.league.findUnique({
       where: { id: leagueId },
       include: { draftState: true },
@@ -341,9 +347,8 @@ export const CommissionerService = {
 
     // Some settings can't be changed after draft starts
     if (league.draftState?.status === 'IN_PROGRESS' || league.draftState?.status === 'COMPLETED') {
-      const restrictedFields = ['draftType', 'totalRounds', 'maxKeepers'];
-      for (const field of restrictedFields) {
-        if (settings[field as keyof typeof settings] !== undefined) {
+      for (const field of LOCKED_AFTER_START) {
+        if (settings[field] !== undefined) {
           throw new Error(`Cannot change ${field} after draft has started`);
         }
       }
@@ -354,11 +359,11 @@ export const CommissionerService = {
       create: {
         leagueId,
         draftType: settings.draftType || 'SNAKE',
-        totalRounds: settings.totalRounds || 15,
+        totalRounds: settings.totalRounds || DEFAULT_TOTAL_ROUNDS,
         timerDurationSeconds: settings.timerDurationSeconds || 90,
         reserveTimeSeconds: settings.reserveTimeSeconds || 120,
         pauseOnTrade: settings.pauseOnTrade ?? true,
-        maxKeepers: settings.maxKeepers || 3,
+        maxKeepers: settings.maxKeepers || DEFAULT_MAX_KEEPERS,
         qbCount: settings.qbCount || 1,
         rbCount: settings.rbCount || 2,
         wrCount: settings.wrCount || 3,
@@ -373,13 +378,8 @@ export const CommissionerService = {
       update: settings,
     });
 
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'SETTINGS_CHANGED',
-        description: 'Draft settings updated',
-        metadata: settings,
-      },
+    await logActivity(leagueId, 'SETTINGS_CHANGED', 'Draft settings updated', {
+      metadata: settings,
     });
   },
 
@@ -387,7 +387,7 @@ export const CommissionerService = {
    * Get draft settings
    */
   async getDraftSettings(leagueId: string) {
-    return await prisma.draftSettings.findUnique({
+    return prisma.draftSettings.findUnique({
       where: { leagueId },
     });
   },
@@ -433,12 +433,11 @@ export const CommissionerService = {
     if (!draftState || draftState.status !== 'IN_PROGRESS') {
       throw new Error('Draft is not in progress');
     }
-
     if (draftState.isPaused) {
       throw new Error('Draft is already paused');
     }
 
-    // Calculate remaining time
+    // Freeze the clock: subtract time elapsed since the timer last started
     let remainingTime = draftState.timerSecondsRemaining || 0;
     if (draftState.timerStartedAt) {
       const elapsed = Math.floor((Date.now() - draftState.timerStartedAt.getTime()) / 1000);
@@ -456,13 +455,7 @@ export const CommissionerService = {
       },
     });
 
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'DRAFT_PAUSED',
-        description: reason || 'Draft paused by commissioner',
-      },
-    });
+    await logActivity(leagueId, 'DRAFT_PAUSED', reason || 'Draft paused by commissioner');
   },
 
   /**
@@ -476,7 +469,6 @@ export const CommissionerService = {
     if (!draftState || draftState.status !== 'IN_PROGRESS') {
       throw new Error('Draft is not in progress');
     }
-
     if (!draftState.isPaused) {
       throw new Error('Draft is not paused');
     }
@@ -491,13 +483,7 @@ export const CommissionerService = {
       },
     });
 
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'DRAFT_RESUMED',
-        description: 'Draft resumed by commissioner',
-      },
-    });
+    await logActivity(leagueId, 'DRAFT_RESUMED', 'Draft resumed by commissioner');
   },
 
   /**
@@ -511,12 +497,10 @@ export const CommissionerService = {
     if (!draftState || draftState.status !== 'IN_PROGRESS') {
       throw new Error('Draft is not in progress');
     }
-
     if (!draftState.currentTeamId) {
       throw new Error('No team currently on the clock');
     }
 
-    // Verify player exists and is available
     const player = await prisma.player.findUnique({
       where: { id: playerId },
     });
@@ -525,7 +509,6 @@ export const CommissionerService = {
       throw new Error('Player not found');
     }
 
-    // Check if already drafted
     const alreadyDrafted = await prisma.draftPick.findFirst({
       where: {
         leagueId,
@@ -540,15 +523,10 @@ export const CommissionerService = {
 
     // The actual pick will be handled by the socket server
     // This method just validates and logs the force pick request
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'AUTO_PICK',
-        description: `Commissioner forced pick: ${player.fullName}`,
-        teamId: draftState.currentTeamId,
-        pickNumber: draftState.currentPick,
-        playerId,
-      },
+    await logActivity(leagueId, 'AUTO_PICK', `Commissioner forced pick: ${player.fullName}`, {
+      teamId: draftState.currentTeamId,
+      pickNumber: draftState.currentPick,
+      playerId,
     });
   },
 
@@ -571,9 +549,6 @@ export const CommissionerService = {
 
     const lastPick = await prisma.draftPick.findUnique({
       where: { id: draftState.lastPickId },
-      include: {
-        currentOwner: true,
-      },
     });
 
     if (!lastPick || !lastPick.selectedPlayerId) {
@@ -584,7 +559,6 @@ export const CommissionerService = {
       where: { id: lastPick.selectedPlayerId },
     });
 
-    // Perform undo in transaction
     await prisma.$transaction(async (tx) => {
       // Remove player from roster
       await tx.playerRoster.deleteMany({
@@ -621,15 +595,10 @@ export const CommissionerService = {
       });
     });
 
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'PICK_UNDONE',
-        description: `Commissioner undid pick: ${player?.fullName}`,
-        teamId: lastPick.currentOwnerId,
-        pickNumber: lastPick.overallPickNumber,
-        playerId: lastPick.selectedPlayerId,
-      },
+    await logActivity(leagueId, 'PICK_UNDONE', `Commissioner undid pick: ${player?.fullName}`, {
+      teamId: lastPick.currentOwnerId,
+      pickNumber: lastPick.overallPickNumber,
+      playerId: lastPick.selectedPlayerId,
     });
 
     return {
@@ -655,11 +624,9 @@ export const CommissionerService = {
     if (!trade) {
       throw new Error('Trade not found');
     }
-
     if (trade.leagueId !== leagueId) {
       throw new Error('Trade does not belong to this league');
     }
-
     if (trade.status !== 'PENDING') {
       throw new Error(`Trade cannot be approved - status is ${trade.status}`);
     }
@@ -672,14 +639,9 @@ export const CommissionerService = {
       },
     });
 
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'TRADE_FORCED',
-        description: `Commissioner force-approved trade`,
-        tradeId,
-        metadata: { notes },
-      },
+    await logActivity(leagueId, 'TRADE_FORCED', 'Commissioner force-approved trade', {
+      tradeId,
+      metadata: { notes },
     });
   },
 
@@ -694,11 +656,9 @@ export const CommissionerService = {
     if (!trade) {
       throw new Error('Trade not found');
     }
-
     if (trade.leagueId !== leagueId) {
       throw new Error('Trade does not belong to this league');
     }
-
     if (trade.status !== 'PENDING' && trade.status !== 'ACCEPTED') {
       throw new Error(`Trade cannot be vetoed - status is ${trade.status}`);
     }
@@ -712,14 +672,12 @@ export const CommissionerService = {
       },
     });
 
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'TRADE_CANCELLED',
-        description: `Commissioner vetoed trade: ${reason || 'No reason given'}`,
-        tradeId,
-      },
-    });
+    await logActivity(
+      leagueId,
+      'TRADE_CANCELLED',
+      `Commissioner vetoed trade: ${reason || 'No reason given'}`,
+      { tradeId }
+    );
   },
 
   // ==========================================================================
@@ -735,7 +693,6 @@ export const CommissionerService = {
     playerId: string,
     keeperRound: number
   ): Promise<void> {
-    // Validate team and player
     const team = await prisma.team.findFirst({
       where: { id: teamId, leagueId },
     });
@@ -747,17 +704,16 @@ export const CommissionerService = {
     const settings = await prisma.draftSettings.findUnique({
       where: { leagueId },
     });
+    const maxKeepers = settings?.maxKeepers || DEFAULT_MAX_KEEPERS;
 
-    // Check keeper count
     const currentKeepers = await prisma.playerRoster.count({
       where: { teamId, leagueId, isKeeper: true },
     });
 
-    if (currentKeepers >= (settings?.maxKeepers || 3)) {
-      throw new Error(`Team already has maximum keepers (${settings?.maxKeepers || 3})`);
+    if (currentKeepers >= maxKeepers) {
+      throw new Error(`Team already has maximum keepers (${maxKeepers})`);
     }
 
-    // Add or update keeper
     await prisma.playerRoster.upsert({
       where: {
         teamId_playerId: { teamId, playerId },
@@ -802,7 +758,7 @@ export const CommissionerService = {
   /**
    * Get all draft activity for a league
    */
-  async getDraftActivity(leagueId: string, limit: number = 100): Promise<any[]> {
+  async getDraftActivity(leagueId: string, limit: number = 100): Promise<DraftActivityLog[]> {
     return prisma.draftActivityLog.findMany({
       where: { leagueId },
       orderBy: { createdAt: 'desc' },
@@ -813,22 +769,24 @@ export const CommissionerService = {
   /**
    * Manually assign pick owner (Commissioner God Mode)
    */
-  async manuallyAssignPickOwner(leagueId: string, pickId: string, newOwnerId: string): Promise<void> {
+  async manuallyAssignPickOwner(
+    leagueId: string,
+    pickId: string,
+    newOwnerId: string
+  ): Promise<void> {
     const pick = await prisma.draftPick.findUnique({
       where: { id: pickId },
-      include: { currentOwner: true }
     });
 
     if (!pick || pick.leagueId !== leagueId) {
       throw new Error('Pick not found in this league');
     }
-
     if (pick.isComplete) {
       throw new Error('Cannot change ownership of a pick that has already been made');
     }
 
     const team = await prisma.team.findUnique({
-      where: { id: newOwnerId }
+      where: { id: newOwnerId },
     });
 
     if (!team || team.leagueId !== leagueId) {
@@ -837,23 +795,23 @@ export const CommissionerService = {
 
     await prisma.draftPick.update({
       where: { id: pickId },
-      data: { currentOwnerId: newOwnerId }
+      data: { currentOwnerId: newOwnerId },
     });
 
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'ORDER_UPDATED',
-        description: `Commissioner manually assigned pick ${pick.round}.${pick.pickInRound} to ${team.name}`,
+    await logActivity(
+      leagueId,
+      'ORDER_UPDATED',
+      `Commissioner manually assigned pick ${pick.round}.${pick.pickInRound} to ${team.name}`,
+      {
         metadata: {
           pickId,
           oldOwnerId: pick.currentOwnerId,
-          newOwnerId: newOwnerId,
+          newOwnerId,
           round: pick.round,
-          pickInRound: pick.pickInRound
-        }
+          pickInRound: pick.pickInRound,
+        },
       }
-    });
+    );
   },
 
   /**
@@ -869,8 +827,8 @@ export const CommissionerService = {
         },
       });
 
-      // Reset all picks AND return traded picks to original owners
-      // Use raw query since Prisma updateMany can't set column = another column
+      // Reset all picks AND return traded picks to original owners.
+      // Raw query because Prisma updateMany can't set column = another column.
       await tx.$executeRawUnsafe(
         `UPDATE "DraftPick" SET "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false, "currentOwnerId" = "originalOwnerId" WHERE "leagueId" = $1`,
         leagueId
@@ -909,13 +867,7 @@ export const CommissionerService = {
       });
     });
 
-    await prisma.draftActivityLog.create({
-      data: {
-        leagueId,
-        activityType: 'SETTINGS_CHANGED',
-        description: 'Draft reset by commissioner',
-      },
-    });
+    await logActivity(leagueId, 'SETTINGS_CHANGED', 'Draft reset by commissioner');
   },
 };
 

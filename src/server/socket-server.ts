@@ -2,17 +2,14 @@
 // Handles real-time draft communication and trade processing
 
 import { createServer } from 'http';
-import { Server } from 'socket.io';
+import { Server, type Socket } from 'socket.io';
+import type { Prisma } from '@prisma/client';
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
   InterServerEvents,
   SocketData,
-  SocketEventName,
   TradeAcceptedPayload,
-  TradeAssetPayload,
-  TeamSummary,
-  DraftPickSummary,
 } from '@/types/socket';
 import { SocketEvents } from '@/types/socket';
 import { prisma } from '@/lib/prisma';
@@ -24,6 +21,13 @@ import { TradeProcessor } from './trade-processor';
 // ============================================================================
 
 type TypedServer = Server<
+  ClientToServerEvents,
+  ServerToClientEvents,
+  InterServerEvents,
+  SocketData
+>;
+
+type DraftSocket = Socket<
   ClientToServerEvents,
   ServerToClientEvents,
   InterServerEvents,
@@ -75,14 +79,28 @@ function getRoomName(leagueId: string): string {
   return `draft:${leagueId}`;
 }
 
-async function verifyCommissioner(userId: string, leagueId: string): Promise<boolean> {
-  const league = await prisma.league.findFirst({
-    where: {
-      id: leagueId,
-      commissionerId: userId,
-    },
+function emitError(socket: DraftSocket, code: string, message: string): void {
+  socket.emit(SocketEvents.ERROR, { code, message });
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+// Emits UNAUTHORIZED and returns false when the socket isn't the commissioner
+function requireCommissioner(socket: DraftSocket, action: string): boolean {
+  if (socket.data.isCommissioner) return true;
+  emitError(socket, 'UNAUTHORIZED', `Only the commissioner can ${action}`);
+  return false;
+}
+
+// Team-scoped actions are allowed for the team's owner or the commissioner
+async function canManageTeam(socket: DraftSocket, teamId: string): Promise<boolean> {
+  const team = await prisma.team.findUnique({
+    where: { id: teamId },
+    select: { ownerId: true },
   });
-  return !!league;
+  return !!team && (team.ownerId === socket.data.userId || socket.data.isCommissioner);
 }
 
 async function getTeamForUser(userId: string, leagueId: string): Promise<string | null> {
@@ -97,15 +115,11 @@ async function getTeamForUser(userId: string, leagueId: string): Promise<string 
 }
 
 // ============================================================================
-// CONNECTION HANDLER
+// ROOM MEMBERSHIP HANDLERS
 // ============================================================================
 
-io.on(SocketEvents.CONNECTION, (socket) => {
-  console.log(`Client connected: ${socket.id}`);
-
-  // -------------------------------------------------------------------------
-  // USER IDENTIFICATION (Global)
-  // -------------------------------------------------------------------------
+function registerRoomHandlers(socket: DraftSocket): void {
+  // User identification (global, e.g. for trade notifications outside the draft)
   socket.on(SocketEvents.AUTHENTICATE, (payload: { userId: string }) => {
     const { userId } = payload;
     if (userId) {
@@ -114,31 +128,10 @@ io.on(SocketEvents.CONNECTION, (socket) => {
     }
   });
 
-  // -------------------------------------------------------------------------
-  // JOIN DRAFT ROOM
-  // -------------------------------------------------------------------------
   socket.on(SocketEvents.JOIN_DRAFT_ROOM, async (payload) => {
     const { leagueId, userId, teamId } = payload;
 
-    console.log(`[DEBUG] JOIN_DRAFT_ROOM - userId: ${userId}, leagueId: ${leagueId}, teamId: ${teamId}`);
-
     try {
-      // First, check if user exists
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-      });
-      console.log(`[DEBUG] User lookup (id: ${userId}):`, user?.email);
-
-      // Check all league members for this league
-      const allMembers = await prisma.leagueMember.findMany({
-        where: { leagueId },
-        include: { user: true },
-      });
-      console.log(
-        `[DEBUG] All league members for ${leagueId}:`,
-        allMembers.map((m) => ({ userId: m.userId, userEmail: m.user.email }))
-      );
-
       // Verify user has access to this league
       let member = await prisma.leagueMember.findUnique({
         where: {
@@ -149,279 +142,173 @@ io.on(SocketEvents.CONNECTION, (socket) => {
         },
       });
 
-      console.log(`[DEBUG] LeagueMember lookup result:`, member);
-
       // FALLBACK: If member record is missing but user is commissioner or has a team,
       // create the membership record on the fly to prevent lockout
       if (!member) {
-        console.log(`[DEBUG] Member record missing for user ${userId} in league ${leagueId}. Checking fallback...`);
-
         const [leagueAsCommissioner, userTeam] = await Promise.all([
           prisma.league.findFirst({
-            where: { id: leagueId, commissionerId: userId }
+            where: { id: leagueId, commissionerId: userId },
           }),
           prisma.team.findFirst({
-            where: { leagueId, ownerId: userId }
-          })
+            where: { leagueId, ownerId: userId },
+          }),
         ]);
 
         if (leagueAsCommissioner || userTeam) {
-          console.log(`[DEBUG] User ${userId} is commissioner or has team. Creating missing LeagueMember record.`);
+          console.log(
+            `[JOIN_DRAFT_ROOM] Creating missing LeagueMember record for user ${userId} in league ${leagueId}`
+          );
           member = await prisma.leagueMember.create({
             data: {
               userId,
               leagueId,
-              role: leagueAsCommissioner ? 'COMMISSIONER' : 'MEMBER'
+              role: leagueAsCommissioner ? 'COMMISSIONER' : 'MEMBER',
             },
             include: {
-              league: true
-            }
+              league: true,
+            },
           });
         }
       }
 
       if (!member) {
-        socket.emit(SocketEvents.ERROR, {
-          code: 'UNAUTHORIZED',
-          message: 'You are not a member of this league',
-        });
+        emitError(socket, 'UNAUTHORIZED', 'You are not a member of this league');
         return;
       }
 
       // Store user data on socket
       socket.data.userId = userId;
       socket.data.leagueId = leagueId;
-      socket.data.teamId = teamId || await getTeamForUser(userId, leagueId) || undefined;
+      socket.data.teamId = teamId || (await getTeamForUser(userId, leagueId)) || undefined;
       socket.data.isCommissioner = member.league.commissionerId === userId;
 
-      // Join the draft room
-      const room = getRoomName(leagueId);
-      await socket.join(room);
+      await socket.join(getRoomName(leagueId));
 
-      // Get draft manager and send current state
-      const manager = getDraftManager(leagueId);
-      const state = await manager.getFullState();
-
-      // Debug logging
-      console.log(`[DEBUG] Sending state to ${userId}:`, {
-        availablePlayers: state.availablePlayers.length,
-        teams: state.draftOrder.length,
-        status: state.status,
-      });
-
+      // Send current state to the newly joined client
+      const state = await getDraftManager(leagueId).getFullState();
       socket.emit(SocketEvents.STATE_SYNC, state);
 
       console.log(`User ${userId} joined draft room for league ${leagueId}`);
     } catch (error) {
       console.error('Error joining draft room:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'JOIN_FAILED',
-        message: 'Failed to join draft room',
-      });
+      emitError(socket, 'JOIN_FAILED', 'Failed to join draft room');
     }
   });
 
-  // -------------------------------------------------------------------------
-  // LEAVE DRAFT ROOM
-  // -------------------------------------------------------------------------
   socket.on(SocketEvents.LEAVE_DRAFT_ROOM, async (payload) => {
     const { leagueId } = payload;
-    const room = getRoomName(leagueId);
-    await socket.leave(room);
+    await socket.leave(getRoomName(leagueId));
     console.log(`User ${socket.data.userId} left draft room for league ${leagueId}`);
   });
+}
 
-  // -------------------------------------------------------------------------
-  // DRAFT START (Commissioner only)
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.DRAFT_START, async (payload) => {
-    const { leagueId } = payload;
+// ============================================================================
+// DRAFT CONTROL HANDLERS
+// ============================================================================
 
-    if (!socket.data.isCommissioner) {
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UNAUTHORIZED',
-        message: 'Only the commissioner can start the draft',
-      });
-      return;
-    }
+function registerDraftControlHandlers(socket: DraftSocket): void {
+  socket.on(SocketEvents.DRAFT_START, async ({ leagueId }) => {
+    if (!requireCommissioner(socket, 'start the draft')) return;
 
     try {
-      const manager = getDraftManager(leagueId);
-      await manager.startDraft();
+      await getDraftManager(leagueId).startDraft();
     } catch (error) {
       console.error('Error starting draft:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'START_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to start draft',
-      });
+      emitError(socket, 'START_FAILED', errorMessage(error, 'Failed to start draft'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // DRAFT PAUSE/RESUME (Commissioner only)
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.DRAFT_PAUSE, async (payload) => {
-    const { leagueId, reason } = payload;
-
-    if (!socket.data.isCommissioner) {
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UNAUTHORIZED',
-        message: 'Only the commissioner can pause the draft',
-      });
-      return;
-    }
-
-    const manager = getDraftManager(leagueId);
-    await manager.pauseDraft(reason || 'Commissioner paused', socket.data.userId!);
-  });
-
-  socket.on(SocketEvents.DRAFT_RESUME, async (payload) => {
-    const { leagueId } = payload;
-
-    if (!socket.data.isCommissioner) {
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UNAUTHORIZED',
-        message: 'Only the commissioner can resume the draft',
-      });
-      return;
-    }
-
-    const manager = getDraftManager(leagueId);
-    await manager.resumeDraft();
-  });
-
-  socket.on(SocketEvents.DRAFT_RESET, async (payload) => {
-    const { leagueId } = payload;
-
-    if (!socket.data.isCommissioner) {
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UNAUTHORIZED',
-        message: 'Only the commissioner can reset the draft',
-      });
-      return;
-    }
+  socket.on(SocketEvents.DRAFT_PAUSE, async ({ leagueId, reason }) => {
+    if (!requireCommissioner(socket, 'pause the draft')) return;
 
     try {
-      const manager = getDraftManager(leagueId);
-      await manager.resetDraft();
-    } catch (error: any) {
+      await getDraftManager(leagueId).pauseDraft(
+        reason || 'Commissioner paused',
+        socket.data.userId!
+      );
+    } catch (error) {
+      console.error('Error pausing draft:', error);
+      emitError(socket, 'PAUSE_FAILED', errorMessage(error, 'Failed to pause draft'));
+    }
+  });
+
+  socket.on(SocketEvents.DRAFT_RESUME, async ({ leagueId }) => {
+    if (!requireCommissioner(socket, 'resume the draft')) return;
+
+    try {
+      await getDraftManager(leagueId).resumeDraft();
+    } catch (error) {
+      console.error('Error resuming draft:', error);
+      emitError(socket, 'RESUME_FAILED', errorMessage(error, 'Failed to resume draft'));
+    }
+  });
+
+  socket.on(SocketEvents.DRAFT_RESET, async ({ leagueId }) => {
+    if (!requireCommissioner(socket, 'reset the draft')) return;
+
+    try {
+      await getDraftManager(leagueId).resetDraft();
+    } catch (error) {
       console.error('Error resetting draft:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'RESET_FAILED',
-        message: error.message || 'Failed to reset draft',
-      });
+      emitError(socket, 'RESET_FAILED', errorMessage(error, 'Failed to reset draft'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // PICK MADE
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.PICK_MADE, async (payload) => {
-    const { leagueId, playerId, teamId } = payload;
-
+  socket.on(SocketEvents.PICK_MADE, async ({ leagueId, playerId, teamId }) => {
     try {
-      const manager = getDraftManager(leagueId);
-      await manager.makePick(teamId, playerId, socket.data.isCommissioner);
+      await getDraftManager(leagueId).makePick(teamId, playerId, socket.data.isCommissioner);
     } catch (error) {
       console.error('Error making pick:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'PICK_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to make pick',
-      });
+      emitError(socket, 'PICK_FAILED', errorMessage(error, 'Failed to make pick'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // FORCE PICK (Commissioner only)
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.FORCE_PICK, async (payload) => {
-    const { leagueId, playerId } = payload;
-
-    if (!socket.data.isCommissioner) {
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UNAUTHORIZED',
-        message: 'Only the commissioner can force a pick',
-      });
-      return;
-    }
+  socket.on(SocketEvents.FORCE_PICK, async ({ leagueId, playerId }) => {
+    if (!requireCommissioner(socket, 'force a pick')) return;
 
     try {
-      const manager = getDraftManager(leagueId);
-      await manager.forcePick(playerId);
+      await getDraftManager(leagueId).forcePick(playerId);
     } catch (error) {
       console.error('Error forcing pick:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'FORCE_PICK_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to force pick',
-      });
+      emitError(socket, 'FORCE_PICK_FAILED', errorMessage(error, 'Failed to force pick'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // UNDO LAST PICK (Commissioner only)
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.PICK_UNDONE, async (payload) => {
-    const { leagueId } = payload;
-
-    if (!socket.data.isCommissioner) {
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UNAUTHORIZED',
-        message: 'Only the commissioner can undo picks',
-      });
-      return;
-    }
+  socket.on(SocketEvents.PICK_UNDONE, async ({ leagueId }) => {
+    if (!requireCommissioner(socket, 'undo picks')) return;
 
     try {
-      const manager = getDraftManager(leagueId);
-      await manager.undoLastPick();
+      await getDraftManager(leagueId).undoLastPick();
     } catch (error) {
       console.error('Error undoing pick:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UNDO_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to undo pick',
-      });
+      emitError(socket, 'UNDO_FAILED', errorMessage(error, 'Failed to undo pick'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // ORDER UPDATED (Commissioner only)
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.ORDER_UPDATED, async (payload) => {
-    const { leagueId, teamOrder } = payload;
-
-    if (!socket.data.isCommissioner) {
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UNAUTHORIZED',
-        message: 'Only the commissioner can update the draft order',
-      });
-      return;
-    }
+  socket.on(SocketEvents.ORDER_UPDATED, async ({ leagueId, teamOrder }) => {
+    if (!requireCommissioner(socket, 'update the draft order')) return;
 
     try {
-      const manager = getDraftManager(leagueId);
-      await manager.setDraftOrder(teamOrder, socket.data.userId!);
+      await getDraftManager(leagueId).setDraftOrder(teamOrder, socket.data.userId!);
     } catch (error) {
       console.error('Error updating order:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'ORDER_UPDATE_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to update order',
-      });
+      emitError(socket, 'ORDER_UPDATE_FAILED', errorMessage(error, 'Failed to update order'));
     }
   });
+}
 
-  // -------------------------------------------------------------------------
-  // TRADE OFFERED
-  // -------------------------------------------------------------------------
+// ============================================================================
+// TRADE HANDLERS
+// ============================================================================
+
+function registerTradeHandlers(socket: DraftSocket): void {
   socket.on(SocketEvents.TRADE_OFFERED, async (payload) => {
     const { leagueId, receiverTeamId, initiatorAssets, receiverAssets } = payload;
 
     try {
       const initiatorTeamId = socket.data.teamId;
       if (!initiatorTeamId) {
-        socket.emit(SocketEvents.ERROR, {
-          code: 'NO_TEAM',
-          message: 'You do not have a team in this league',
-        });
+        emitError(socket, 'NO_TEAM', 'You do not have a team in this league');
         return;
       }
 
@@ -434,8 +321,7 @@ io.on(SocketEvents.CONNECTION, (socket) => {
       });
 
       // Broadcast to both teams and commissioner
-      const room = getRoomName(leagueId);
-      io.to(room).emit(SocketEvents.TRADE_OFFERED, trade);
+      io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_OFFERED, trade);
 
       // ALSO emit to receiver directly for global notification
       if (trade.receiverTeam.ownerId) {
@@ -443,144 +329,20 @@ io.on(SocketEvents.CONNECTION, (socket) => {
       }
     } catch (error) {
       console.error('Error creating trade:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'TRADE_CREATE_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to create trade',
-      });
+      emitError(socket, 'TRADE_CREATE_FAILED', errorMessage(error, 'Failed to create trade'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // TRADE ACCEPTED - CRITICAL HANDLER
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.TRADE_ACCEPTED, async (payload) => {
-    const { leagueId, tradeId } = payload;
-
+  socket.on(SocketEvents.TRADE_ACCEPTED, async ({ leagueId, tradeId }) => {
     try {
-      // Verify the user can accept this trade
-      const trade = await prisma.trade.findUnique({
-        where: { id: tradeId },
-        include: {
-          receiverTeam: true,
-          initiatorTeam: true,
-        },
-      });
-
-      if (!trade) {
-        socket.emit(SocketEvents.ERROR, {
-          code: 'TRADE_NOT_FOUND',
-          message: 'Trade not found',
-        });
-        return;
-      }
-
-      // Only receiver can accept (or commissioner can force)
-      const canAccept =
-        trade.receiverTeam.ownerId === socket.data.userId ||
-        socket.data.isCommissioner;
-
-      if (!canAccept) {
-        socket.emit(SocketEvents.ERROR, {
-          code: 'UNAUTHORIZED',
-          message: 'Only the receiving team can accept this trade',
-        });
-        return;
-      }
-
-      // Get draft manager to check if we need to pause
-      const manager = getDraftManager(leagueId);
-      const draftState = await manager.getCurrentState();
-
-      // Determine if draft should be paused
-      const shouldPause = draftState.status === 'IN_PROGRESS' &&
-        await shouldPauseForTrade(leagueId, tradeId, draftState.currentTeamId);
-
-      // Mark as processing
-      io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_PROCESSING, {
-        leagueId,
-        tradeId,
-      });
-
-      // If we should pause, do it before processing
-      if (shouldPause) {
-        await manager.pauseDraft('Trade in progress', 'system');
-      }
-
-      // Process the trade atomically
-      const result = await tradeProcessor.acceptTrade(tradeId, socket.data.isCommissioner);
-
-      // Clear cached state so syncCurrentTeam reads fresh DB data
-      // (the cache was populated earlier in this handler and is now stale)
-      manager.clearStateCache();
-
-      // Sync current team in case the current pick was traded
-      const newTeamId = await manager.syncCurrentTeam();
-      console.log(`[TRADE_ACCEPTED] syncCurrentTeam returned: ${newTeamId} (was: ${draftState.currentTeamId})`);
-
-      // Get updated rosters for the teams involved
-      const [initiatorRoster, receiverRoster] = await Promise.all([
-        manager.getTeamRoster(result.initiatorTeam.id),
-        manager.getTeamRoster(result.receiverTeam.id),
-      ]);
-
-      // Build the payload
-      const acceptedPayload: TradeAcceptedPayload = {
-        leagueId,
-        tradeId,
-        initiatorTeam: result.initiatorTeam,
-        receiverTeam: result.receiverTeam,
-        initiatorAssets: result.initiatorAssets,
-        receiverAssets: result.receiverAssets,
-        updatedDraftOrder: result.updatedPicks,
-        teamRosterUpdates: {
-          [result.initiatorTeam.id]: initiatorRoster,
-          [result.receiverTeam.id]: receiverRoster,
-        },
-        draftPaused: shouldPause,
-        pauseReason: shouldPause ? 'Trade completed - draft paused for review' : undefined,
-        timestamp: new Date().toISOString(),
-      };
-
-      // Broadcast trade accepted
-      io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_ACCEPTED, acceptedPayload);
-
-      // Send full state sync to ensure all clients have accurate state
-      // (especially currentTeamId if the pick was traded)
-      const fullState = await manager.getFullState();
-      io.to(getRoomName(leagueId)).emit(SocketEvents.STATE_SYNC, fullState);
-
-      // Log the activity
-      await prisma.draftActivityLog.create({
-        data: {
-          leagueId,
-          activityType: 'TRADE_ACCEPTED',
-          description: `Trade accepted between ${result.initiatorTeam.name} and ${result.receiverTeam.name}`,
-          tradeId,
-          triggeredById: socket.data.userId,
-          metadata: ({
-            initiatorAssets: result.initiatorAssets,
-            receiverAssets: result.receiverAssets,
-            draftPaused: shouldPause,
-          } as any),
-        },
-      });
-
-      console.log(`Trade ${tradeId} accepted and processed`);
+      await handleTradeAccepted(socket, leagueId, tradeId);
     } catch (error) {
       console.error('Error accepting trade:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'TRADE_ACCEPT_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to accept trade',
-      });
+      emitError(socket, 'TRADE_ACCEPT_FAILED', errorMessage(error, 'Failed to accept trade'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // TRADE REJECTED
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.TRADE_REJECTED, async (payload) => {
-    const { leagueId, tradeId } = payload;
-
+  socket.on(SocketEvents.TRADE_REJECTED, async ({ leagueId, tradeId }) => {
     try {
       await tradeProcessor.rejectTrade(tradeId, socket.data.userId!);
 
@@ -592,19 +354,11 @@ io.on(SocketEvents.CONNECTION, (socket) => {
       });
     } catch (error) {
       console.error('Error rejecting trade:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'TRADE_REJECT_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to reject trade',
-      });
+      emitError(socket, 'TRADE_REJECT_FAILED', errorMessage(error, 'Failed to reject trade'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // TRADE CANCELLED
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.TRADE_CANCELLED, async (payload) => {
-    const { leagueId, tradeId } = payload;
-
+  socket.on(SocketEvents.TRADE_CANCELLED, async ({ leagueId, tradeId }) => {
     try {
       await tradeProcessor.cancelTrade(tradeId, socket.data.userId!);
 
@@ -616,65 +370,139 @@ io.on(SocketEvents.CONNECTION, (socket) => {
       });
     } catch (error) {
       console.error('Error cancelling trade:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'TRADE_CANCEL_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to cancel trade',
-      });
+      emitError(socket, 'TRADE_CANCEL_FAILED', errorMessage(error, 'Failed to cancel trade'));
     }
   });
-  // -------------------------------------------------------------------------
-  // QUEUE UPDATED
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.UPDATE_QUEUE, async (payload) => {
-    const { leagueId, teamId, playerIds } = payload;
+}
 
+// The critical path: validates, optionally pauses the draft, processes the
+// trade atomically, then re-syncs every client.
+async function handleTradeAccepted(
+  socket: DraftSocket,
+  leagueId: string,
+  tradeId: string
+): Promise<void> {
+  const trade = await prisma.trade.findUnique({
+    where: { id: tradeId },
+    include: {
+      receiverTeam: true,
+      initiatorTeam: true,
+    },
+  });
+
+  if (!trade) {
+    emitError(socket, 'TRADE_NOT_FOUND', 'Trade not found');
+    return;
+  }
+
+  // Only receiver can accept (or commissioner can force)
+  const canAccept =
+    trade.receiverTeam.ownerId === socket.data.userId || socket.data.isCommissioner;
+
+  if (!canAccept) {
+    emitError(socket, 'UNAUTHORIZED', 'Only the receiving team can accept this trade');
+    return;
+  }
+
+  const manager = getDraftManager(leagueId);
+  const draftState = await manager.getCurrentState();
+
+  const shouldPause =
+    draftState.status === 'IN_PROGRESS' &&
+    (await shouldPauseForTrade(leagueId, tradeId, draftState.currentTeamId));
+
+  // Mark as processing
+  io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_PROCESSING, {
+    leagueId,
+    tradeId,
+  });
+
+  // If we should pause, do it before processing
+  if (shouldPause) {
+    await manager.pauseDraft('Trade in progress', 'system');
+  }
+
+  // Process the trade atomically
+  const result = await tradeProcessor.acceptTrade(tradeId, socket.data.isCommissioner);
+
+  // Clear cached state so syncCurrentTeam reads fresh DB data
+  // (the cache was populated earlier in this handler and is now stale)
+  manager.clearStateCache();
+
+  // Sync current team in case the current pick was traded
+  await manager.syncCurrentTeam();
+
+  // Get updated rosters for the teams involved
+  const [initiatorRoster, receiverRoster] = await Promise.all([
+    manager.getTeamRoster(result.initiatorTeam.id),
+    manager.getTeamRoster(result.receiverTeam.id),
+  ]);
+
+  const acceptedPayload: TradeAcceptedPayload = {
+    leagueId,
+    tradeId,
+    initiatorTeam: result.initiatorTeam,
+    receiverTeam: result.receiverTeam,
+    initiatorAssets: result.initiatorAssets,
+    receiverAssets: result.receiverAssets,
+    updatedDraftOrder: result.updatedPicks,
+    teamRosterUpdates: {
+      [result.initiatorTeam.id]: initiatorRoster,
+      [result.receiverTeam.id]: receiverRoster,
+    },
+    draftPaused: shouldPause,
+    pauseReason: shouldPause ? 'Trade completed - draft paused for review' : undefined,
+    timestamp: new Date().toISOString(),
+  };
+
+  io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_ACCEPTED, acceptedPayload);
+
+  // Send full state sync to ensure all clients have accurate state
+  // (especially currentTeamId if the pick was traded)
+  const fullState = await manager.getFullState();
+  io.to(getRoomName(leagueId)).emit(SocketEvents.STATE_SYNC, fullState);
+
+  await prisma.draftActivityLog.create({
+    data: {
+      leagueId,
+      activityType: 'TRADE_ACCEPTED',
+      description: `Trade accepted between ${result.initiatorTeam.name} and ${result.receiverTeam.name}`,
+      tradeId,
+      triggeredById: socket.data.userId,
+      metadata: {
+        initiatorAssets: result.initiatorAssets,
+        receiverAssets: result.receiverAssets,
+        draftPaused: shouldPause,
+      } as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  console.log(`Trade ${tradeId} accepted and processed`);
+}
+
+// ============================================================================
+// TEAM & QUEUE HANDLERS
+// ============================================================================
+
+function registerTeamHandlers(socket: DraftSocket): void {
+  socket.on(SocketEvents.UPDATE_QUEUE, async ({ leagueId, teamId, playerIds }) => {
     try {
-      // Verify the user owns this team (or is commissioner)
-      const team = await prisma.team.findUnique({
-        where: { id: teamId },
-        select: { ownerId: true }
-      });
-
-      if (!team || (team.ownerId !== socket.data.userId && !socket.data.isCommissioner)) {
-        socket.emit(SocketEvents.ERROR, {
-          code: 'UNAUTHORIZED',
-          message: 'You do not have permission to update this queue'
-        });
+      if (!(await canManageTeam(socket, teamId))) {
+        emitError(socket, 'UNAUTHORIZED', 'You do not have permission to update this queue');
         return;
       }
 
-      const manager = getDraftManager(leagueId);
-      await manager.updateQueue(teamId, playerIds);
+      await getDraftManager(leagueId).updateQueue(teamId, playerIds);
     } catch (error) {
       console.error('Error updating queue:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'QUEUE_UPDATE_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to update queue'
-      });
+      emitError(socket, 'QUEUE_UPDATE_FAILED', errorMessage(error, 'Failed to update queue'));
     }
   });
 
-  // -------------------------------------------------------------------------
-  // UPDATE TEAM
-  // -------------------------------------------------------------------------
-  socket.on(SocketEvents.UPDATE_TEAM, async (payload) => {
-    const { leagueId, teamId, name } = payload;
-
+  socket.on(SocketEvents.UPDATE_TEAM, async ({ leagueId, teamId, name }) => {
     try {
-      // Verify authorization: must be owner of the team or commissioner
-      const team = await prisma.team.findUnique({
-        where: { id: teamId },
-        select: { ownerId: true },
-      });
-
-      const isOwner = team?.ownerId === socket.data.userId;
-      const isAdmin = socket.data.isCommissioner;
-
-      if (!isOwner && !isAdmin) {
-        socket.emit(SocketEvents.ERROR, {
-          code: 'UNAUTHORIZED',
-          message: 'You are not authorized to update this team',
-        });
+      if (!(await canManageTeam(socket, teamId))) {
+        emitError(socket, 'UNAUTHORIZED', 'You are not authorized to update this team');
         return;
       }
 
@@ -692,17 +520,23 @@ io.on(SocketEvents.CONNECTION, (socket) => {
       console.log(`Team ${teamId} updated to name: ${name}`);
     } catch (error) {
       console.error('Error updating team:', error);
-      socket.emit(SocketEvents.ERROR, {
-        code: 'UPDATE_FAILED',
-        message: 'Failed to update team name',
-      });
+      emitError(socket, 'UPDATE_FAILED', 'Failed to update team name');
     }
   });
+}
 
+// ============================================================================
+// CONNECTION HANDLER
+// ============================================================================
 
-  // -------------------------------------------------------------------------
-  // DISCONNECT
-  // -------------------------------------------------------------------------
+io.on(SocketEvents.CONNECTION, (socket) => {
+  console.log(`Client connected: ${socket.id}`);
+
+  registerRoomHandlers(socket);
+  registerDraftControlHandlers(socket);
+  registerTradeHandlers(socket);
+  registerTeamHandlers(socket);
+
   socket.on(SocketEvents.DISCONNECT, () => {
     console.log(`Client disconnected: ${socket.id}`);
   });
@@ -712,12 +546,14 @@ io.on(SocketEvents.CONNECTION, (socket) => {
 // HELPER: Check if draft should pause for trade
 // ============================================================================
 
+// Picks traded within this window of the current pick trigger a pause
+const PAUSE_PICK_WINDOW = 3;
+
 async function shouldPauseForTrade(
   leagueId: string,
   tradeId: string,
   currentTeamId: string | null
 ): Promise<boolean> {
-  // Get draft settings
   const settings = await prisma.draftSettings.findUnique({
     where: { leagueId },
   });
@@ -726,7 +562,6 @@ async function shouldPauseForTrade(
     return false;
   }
 
-  // Get trade to see if it involves current team or affects current pick
   const trade = await prisma.trade.findUnique({
     where: { id: tradeId },
     include: {
@@ -740,36 +575,25 @@ async function shouldPauseForTrade(
 
   if (!trade) return false;
 
-  // Check if either team in the trade is currently on the clock
-  if (
-    trade.initiatorTeamId === currentTeamId ||
-    trade.receiverTeamId === currentTeamId
-  ) {
+  // Pause if either team in the trade is currently on the clock
+  if (trade.initiatorTeamId === currentTeamId || trade.receiverTeamId === currentTeamId) {
     return true;
   }
 
-  // Check if any traded picks affect the current pick order
   const currentState = await prisma.draftState.findUnique({
     where: { leagueId },
   });
 
   if (!currentState) return false;
 
-  // Check if any of the traded picks are upcoming
-  for (const asset of trade.assets) {
-    if (asset.draftPick && !asset.draftPick.isComplete) {
-      // If the pick is close to the current pick, pause
-      if (
-        asset.draftPick.overallPickNumber &&
-        currentState.currentPick &&
-        asset.draftPick.overallPickNumber <= currentState.currentPick + 3
-      ) {
-        return true;
-      }
-    }
-  }
-
-  return false;
+  // Pause if any traded pick is upcoming soon
+  return trade.assets.some(
+    (asset) =>
+      asset.draftPick &&
+      !asset.draftPick.isComplete &&
+      asset.draftPick.overallPickNumber !== null &&
+      asset.draftPick.overallPickNumber <= currentState.currentPick + PAUSE_PICK_WINDOW
+  );
 }
 
 // ============================================================================
@@ -778,8 +602,10 @@ async function shouldPauseForTrade(
 
 export { io, httpServer };
 
-export function startSocketServer(port: number = Number(process.env.PORT) || Number(process.env.SOCKET_PORT) || 3001): void {
-  httpServer.once('error', (err: any) => {
+export function startSocketServer(
+  port: number = Number(process.env.PORT) || Number(process.env.SOCKET_PORT) || 3001
+): void {
+  httpServer.once('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
       console.warn(`Port ${port} is already in use. Attempting to use port ${port + 1}...`);
       startSocketServer(port + 1);

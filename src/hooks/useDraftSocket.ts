@@ -3,13 +3,15 @@
 
 'use client';
 
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
+import type { DraftStatus } from '@prisma/client';
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
   StateSyncPayload,
   PickMadePayload,
+  PickUndonePayload,
   TimerTickPayload,
   TradeOfferedPayload,
   TradeAcceptedPayload,
@@ -20,6 +22,7 @@ import type {
   TeamSummary,
   PlayerSummary,
   RosterPlayer,
+  RosterSettings,
   DraftPickSummary,
   ErrorPayload,
 } from '@/types/socket';
@@ -33,7 +36,7 @@ type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 export interface DraftState {
   isConnected: boolean;
-  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'PAUSED' | 'COMPLETED' | 'CANCELLED';
+  status: DraftStatus;
   currentRound: number;
   currentPick: number;
   currentTeamId: string | null;
@@ -50,21 +53,13 @@ export interface DraftState {
   totalRounds: number;
   draftType: 'SNAKE' | 'LINEAR';
   teamQueues: Record<string, PlayerSummary[]>;
-  rosterSettings?: {
-    qbCount: number;
-    rbCount: number;
-    wrCount: number;
-    teCount: number;
-    flexCount: number;
-    superflexCount: number;
-    kCount: number;
-    defCount: number;
-    benchCount: number;
-  };
+  rosterSettings?: RosterSettings;
   lastUpdate: Date | null;
   error: ErrorPayload | null;
   pendingPickId: string | null;
 }
+
+type TradeAssetInput = { assetType: string; id: string };
 
 interface UseDraftSocketOptions {
   leagueId: string;
@@ -86,8 +81,8 @@ interface UseDraftSocketReturn {
     makePick: (playerId: string) => void;
     proposeTrade: (
       receiverTeamId: string,
-      myAssets: { assetType: string; id: string }[],
-      theirAssets: { assetType: string; id: string }[]
+      myAssets: TradeAssetInput[],
+      theirAssets: TradeAssetInput[]
     ) => void;
     acceptTrade: (tradeId: string) => void;
     rejectTrade: (tradeId: string) => void;
@@ -112,6 +107,8 @@ interface UseDraftSocketReturn {
 // INITIAL STATE
 // ============================================================================
 
+const DEFAULT_TOTAL_ROUNDS = 14;
+
 const initialState: DraftState = {
   isConnected: false,
   status: 'NOT_STARTED',
@@ -128,13 +125,243 @@ const initialState: DraftState = {
   availablePlayers: [],
   teamRosters: {},
   pendingTrades: [],
-  totalRounds: 14,
+  totalRounds: DEFAULT_TOTAL_ROUNDS,
   draftType: 'SNAKE',
   teamQueues: {},
   lastUpdate: null,
   error: null,
   pendingPickId: null,
 };
+
+// ============================================================================
+// PURE STATE TRANSITIONS
+// Kept outside the hook so they are individually testable and the socket
+// wiring below stays thin.
+// ============================================================================
+
+function clearPickSelection(pick: DraftPickSummary): DraftPickSummary {
+  return { ...pick, isComplete: false, selectedPlayer: undefined, selectedAt: undefined };
+}
+
+function mergeRosterUpdates(
+  rosters: Record<string, RosterPlayer[]>,
+  updates?: Record<string, RosterPlayer[]>
+): Record<string, RosterPlayer[]> {
+  return updates ? { ...rosters, ...updates } : rosters;
+}
+
+function withoutTrade(prev: DraftState, tradeId: string): DraftState {
+  return {
+    ...prev,
+    pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== tradeId),
+    lastUpdate: new Date(),
+  };
+}
+
+// Full-state replacement used for STATE_SYNC and DRAFT_RESET.
+function applyStateSync(prev: DraftState, payload: StateSyncPayload): DraftState {
+  return {
+    ...prev,
+    status: payload.status,
+    currentRound: payload.currentRound,
+    currentPick: payload.currentPick,
+    currentTeamId: payload.currentTeamId,
+    currentTeam: payload.currentTeam,
+    isPaused: payload.isPaused,
+    pauseReason: payload.pauseReason,
+    timerSecondsRemaining: payload.timerSecondsRemaining,
+    draftOrder: payload.draftOrder,
+    completedPicks: payload.completedPicks,
+    allPicks: payload.allPicks,
+    availablePlayers: payload.availablePlayers,
+    teamRosters: payload.teamRosters,
+    pendingTrades: payload.pendingTrades,
+    totalRounds: payload.totalRounds || DEFAULT_TOTAL_ROUNDS,
+    draftType: payload.draftType || 'SNAKE',
+    rosterSettings: payload.rosterSettings,
+    teamQueues: payload.teamQueues || {},
+    lastUpdate: new Date(),
+  };
+}
+
+function applyPickMade(prev: DraftState, payload: PickMadePayload): DraftState {
+  return {
+    ...prev,
+    // Filter out any optimistic pick matching this pick number to avoid duplicates
+    completedPicks: [
+      ...prev.completedPicks.filter((p) => p.overallPickNumber !== payload.pickNumber),
+      payload.pick,
+    ],
+    // Remove player (may already be removed by optimistic update)
+    availablePlayers: prev.availablePlayers.filter((p) => p.id !== payload.player.id),
+    // Replace the pick at this overall pick number so the official server pick
+    // supersedes our optimistic "opt-..." pick
+    allPicks: prev.allPicks.map((p) =>
+      p.overallPickNumber === payload.pickNumber ? payload.pick : p
+    ),
+    currentPick: payload.nextPick?.pickNumber || prev.currentPick,
+    currentRound: payload.nextPick?.round || prev.currentRound,
+    currentTeamId: payload.nextPick?.teamId || null,
+    currentTeam: payload.nextPick?.team || null,
+    teamRosters: mergeRosterUpdates(prev.teamRosters, payload.teamRosterUpdates),
+    pendingPickId: null, // Clear optimistic flag
+    lastUpdate: new Date(),
+  };
+}
+
+function applyPickUndone(prev: DraftState, payload: PickUndonePayload): DraftState {
+  return {
+    ...prev,
+    completedPicks: prev.completedPicks.filter((p) => p.id !== payload.pickId),
+    currentPick: payload.pickNumber,
+    currentTeamId: payload.revertedToTeamId,
+    teamRosters: mergeRosterUpdates(prev.teamRosters, payload.teamRosterUpdates),
+    allPicks: prev.allPicks.map((p) => (p.id === payload.pickId ? clearPickSelection(p) : p)),
+    lastUpdate: new Date(),
+  };
+}
+
+// Remove the taken player from the available pool AND from every team queue.
+function applyPlayerTaken(prev: DraftState, playerId: string): DraftState {
+  const teamQueues: Record<string, PlayerSummary[]> = {};
+  for (const [queueTeamId, queue] of Object.entries(prev.teamQueues)) {
+    teamQueues[queueTeamId] = queue.filter((p) => p.id !== playerId);
+  }
+
+  return {
+    ...prev,
+    availablePlayers: prev.availablePlayers.filter((p) => p.id !== playerId),
+    teamQueues,
+  };
+}
+
+function mergeUpdatedPicks(
+  picks: DraftPickSummary[],
+  updates: DraftPickSummary[]
+): DraftPickSummary[] {
+  const pickById = new Map(picks.map((p) => [p.id, p]));
+  for (const updated of updates) {
+    const existing = pickById.get(updated.id);
+    pickById.set(updated.id, existing ? { ...existing, ...updated } : updated);
+  }
+  return Array.from(pickById.values()).sort(
+    (a, b) => a.season - b.season || a.overallPickNumber - b.overallPickNumber
+  );
+}
+
+function applyTradeAccepted(prev: DraftState, payload: TradeAcceptedPayload): DraftState {
+  return {
+    ...prev,
+    pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== payload.tradeId),
+    isPaused: payload.draftPaused ? true : prev.isPaused,
+    pauseReason: payload.pauseReason || prev.pauseReason,
+    teamRosters: mergeRosterUpdates(prev.teamRosters, payload.teamRosterUpdates),
+    allPicks: payload.updatedDraftOrder
+      ? mergeUpdatedPicks(prev.allPicks, payload.updatedDraftOrder)
+      : prev.allPicks,
+    lastUpdate: new Date(),
+  };
+}
+
+// Optimistically move players and picks between the two teams of an accepted trade.
+function applyOptimisticTradeAccept(prev: DraftState, tradeId: string): DraftState {
+  const trade = prev.pendingTrades.find((t) => t.tradeId === tradeId);
+  if (!trade) return prev;
+
+  const initiatorId = trade.initiatorTeam.id;
+  const receiverId = trade.receiverTeam.id;
+
+  // Move players between rosters
+  const teamRosters = { ...prev.teamRosters };
+  const initiatorPlayers = [...(teamRosters[initiatorId] || [])];
+  const receiverPlayers = [...(teamRosters[receiverId] || [])];
+
+  const movePlayer = (from: RosterPlayer[], to: RosterPlayer[], playerId?: string) => {
+    const index = from.findIndex((p) => p.id === playerId);
+    if (index !== -1) {
+      const [moved] = from.splice(index, 1);
+      to.push(moved!);
+    }
+  };
+
+  for (const asset of trade.initiatorAssets) {
+    if (asset.assetType === 'PLAYER') movePlayer(initiatorPlayers, receiverPlayers, asset.player?.id);
+  }
+  for (const asset of trade.receiverAssets) {
+    if (asset.assetType === 'PLAYER') movePlayer(receiverPlayers, initiatorPlayers, asset.player?.id);
+  }
+
+  teamRosters[initiatorId] = initiatorPlayers;
+  teamRosters[receiverId] = receiverPlayers;
+
+  // Move draft picks on the board.
+  // NOTE: this compares the trade ASSET id against the draft PICK id, so it
+  // never matches and the optimistic pick move is a no-op; the board is
+  // corrected when the server's TRADE_ACCEPTED arrives with updatedDraftOrder.
+  // Kept as-is to preserve behavior — fixing it means using asset.draftPick?.id.
+  const initiatorGivesPicks = new Set(
+    trade.initiatorAssets.filter((a) => a.assetType === 'DRAFT_PICK').map((a) => a.id)
+  );
+  const receiverGivesPicks = new Set(
+    trade.receiverAssets.filter((a) => a.assetType === 'DRAFT_PICK').map((a) => a.id)
+  );
+
+  const allPicks = prev.allPicks.map((p) => {
+    if (initiatorGivesPicks.has(p.id)) {
+      return { ...p, currentOwnerId: receiverId, currentOwnerName: trade.receiverTeam.name };
+    }
+    if (receiverGivesPicks.has(p.id)) {
+      return { ...p, currentOwnerId: initiatorId, currentOwnerName: trade.initiatorTeam.name };
+    }
+    return p;
+  });
+
+  return {
+    ...prev,
+    pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== tradeId),
+    teamRosters,
+    allPicks,
+    lastUpdate: new Date(),
+  };
+}
+
+// Rename a team everywhere it appears. Callers decide whether to bump lastUpdate.
+function applyTeamRename(prev: DraftState, teamId: string, name: string): DraftState {
+  const renamePickOwner = (pick: DraftPickSummary): DraftPickSummary =>
+    pick.currentOwnerId === teamId ? { ...pick, currentOwnerName: name } : pick;
+
+  return {
+    ...prev,
+    draftOrder: prev.draftOrder.map((t) => (t.id === teamId ? { ...t, name } : t)),
+    currentTeam:
+      prev.currentTeam?.id === teamId ? { ...prev.currentTeam, name } : prev.currentTeam,
+    allPicks: prev.allPicks.map(renamePickOwner),
+    completedPicks: prev.completedPicks.map(renamePickOwner),
+  };
+}
+
+function buildOptimisticPick(
+  prev: DraftState,
+  teamId: string,
+  player: PlayerSummary,
+  idPrefix: string,
+  fallbackOwnerName: string
+): DraftPickSummary {
+  return {
+    id: `${idPrefix}-${Date.now()}`,
+    season: new Date().getFullYear(),
+    round: prev.currentRound,
+    pickInRound: 0, // Unknown until the server confirms
+    overallPickNumber: prev.currentPick,
+    currentOwnerId: teamId,
+    currentOwnerName: prev.currentTeam?.name || fallbackOwnerName,
+    originalOwnerId: teamId,
+    isComplete: true,
+    isKeeper: false,
+    selectedPlayer: player,
+    selectedAt: new Date().toISOString(),
+  };
+}
 
 // ============================================================================
 // HOOK
@@ -158,13 +385,10 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
   // Separate timer state to avoid re-rendering the entire component tree on every tick
   const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
 
-  // Get my team from draft order
   const myTeam = state.draftOrder.find((t) => t.id === teamId) || null;
 
-  // Check if it's my turn
-  const isMyTurn = state.status === 'IN_PROGRESS' &&
-    !state.isPaused &&
-    state.currentTeamId === teamId;
+  const isMyTurn =
+    state.status === 'IN_PROGRESS' && !state.isPaused && state.currentTeamId === teamId;
 
   // Use refs for callbacks to avoid re-connecting when they change
   const callbacks = useRef({
@@ -209,12 +433,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       console.log('Socket connected');
       setState((prev) => ({ ...prev, isConnected: true, error: null }));
 
-      // Join the draft room
-      socket.emit(SocketEvents.JOIN_DRAFT_ROOM, {
-        leagueId,
-        userId,
-        teamId,
-      });
+      socket.emit(SocketEvents.JOIN_DRAFT_ROOM, { leagueId, userId, teamId });
     });
 
     socket.on('disconnect', (reason) => {
@@ -227,42 +446,20 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       setState((prev) => ({
         ...prev,
         isConnected: false,
-        error: { code: 'CONN_ERROR', message: error.message }
+        error: { code: 'CONN_ERROR', message: error.message },
       }));
     });
 
-    // State sync (initial load and reconnection)
+    // State sync (initial load, reconnection, and full reset)
     socket.on(SocketEvents.STATE_SYNC, (payload: StateSyncPayload) => {
-      console.log('[CLIENT DEBUG] STATE_SYNC received:', {
-        availablePlayers: payload.availablePlayers?.length,
-        draftOrder: payload.draftOrder?.length,
-        status: payload.status,
-      });
-      setState((prev) => ({
-        ...prev,
-        status: payload.status,
-        currentRound: payload.currentRound,
-        currentPick: payload.currentPick,
-        currentTeamId: payload.currentTeamId,
-        currentTeam: payload.currentTeam,
-        isPaused: payload.isPaused,
-        pauseReason: payload.pauseReason,
-        timerSecondsRemaining: payload.timerSecondsRemaining,
-        draftOrder: payload.draftOrder,
-        completedPicks: payload.completedPicks,
-        allPicks: payload.allPicks,
-        availablePlayers: payload.availablePlayers,
-        teamRosters: payload.teamRosters,
-        pendingTrades: payload.pendingTrades,
-        totalRounds: payload.totalRounds || 14,
-        draftType: payload.draftType || 'SNAKE',
-        rosterSettings: payload.rosterSettings,
-        teamQueues: payload.teamQueues || {},
-        lastUpdate: new Date(),
-      }));
+      setState((prev) => applyStateSync(prev, payload));
     });
 
-    // Draft start
+    socket.on(SocketEvents.DRAFT_RESET, (payload: StateSyncPayload) => {
+      setState((prev) => applyStateSync(prev, payload));
+    });
+
+    // Draft lifecycle
     socket.on(SocketEvents.DRAFT_START, (payload: DraftStartPayload) => {
       setState((prev) => ({
         ...prev,
@@ -277,7 +474,6 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       callbacks.current.onDraftStart?.(payload);
     });
 
-    // Draft pause/resume
     socket.on(SocketEvents.DRAFT_PAUSE, (payload: DraftPausePayload) => {
       setState((prev) => ({
         ...prev,
@@ -298,7 +494,6 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       }));
     });
 
-    // Draft complete
     socket.on(SocketEvents.DRAFT_COMPLETE, () => {
       setState((prev) => ({
         ...prev,
@@ -315,46 +510,12 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       setTimerSeconds(payload.secondsRemaining);
     });
 
-    // Pick made — reconcile with any optimistic state
+    // Pick events
     socket.on(SocketEvents.PICK_MADE, (payload: PickMadePayload) => {
-      setState((prev) => {
-        // Filter out any optimistic pick matching this pick number to avoid duplicates
-        const newCompletedPicks = [
-          ...prev.completedPicks.filter(p => p.overallPickNumber !== payload.pickNumber),
-          payload.pick
-        ];
-
-        // Remove player (may already be removed by optimistic update)
-        const newAvailablePlayers = prev.availablePlayers.filter(
-          (p) => p.id !== payload.player.id
-        );
-
-        // Update allPicks by replacing the pick at this overall pick number
-        // This ensures the official server pick replaces our optimistic "opt-..." pick
-        const updatedAllPicks = prev.allPicks.map(p => 
-          p.overallPickNumber === payload.pickNumber ? payload.pick : p
-        );
-
-        return {
-          ...prev,
-          completedPicks: newCompletedPicks,
-          availablePlayers: newAvailablePlayers,
-          allPicks: updatedAllPicks,
-          currentPick: payload.nextPick?.pickNumber || prev.currentPick,
-          currentRound: payload.nextPick?.round || prev.currentRound,
-          currentTeamId: payload.nextPick?.teamId || null,
-          currentTeam: payload.nextPick?.team || null,
-          teamRosters: payload.teamRosterUpdates
-            ? { ...prev.teamRosters, ...payload.teamRosterUpdates }
-            : prev.teamRosters,
-          pendingPickId: null, // Clear optimistic flag
-          lastUpdate: new Date(),
-        };
-      });
+      setState((prev) => applyPickMade(prev, payload));
       callbacks.current.onPickMade?.(payload);
     });
 
-    // On the clock
     socket.on(SocketEvents.ON_THE_CLOCK, (payload: OnTheClockPayload) => {
       setState((prev) => ({
         ...prev,
@@ -367,50 +528,15 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       }));
     });
 
-    // Pick undone
     socket.on(SocketEvents.PICK_UNDONE, (payload) => {
-      setState((prev) => {
-        const newCompletedPicks = prev.completedPicks.filter(
-          (p) => p.id !== payload.pickId
-        );
-        return {
-          ...prev,
-          completedPicks: newCompletedPicks,
-          currentPick: payload.pickNumber,
-          currentTeamId: payload.revertedToTeamId,
-          teamRosters: payload.teamRosterUpdates
-            ? { ...prev.teamRosters, ...payload.teamRosterUpdates }
-            : prev.teamRosters,
-          allPicks: prev.allPicks.map((p) =>
-            p.id === payload.pickId ? { ...p, isComplete: false, selectedPlayer: undefined, selectedAt: undefined } : p
-          ),
-          lastUpdate: new Date(),
-        };
-      });
+      setState((prev) => applyPickUndone(prev, payload));
     });
 
-    // Player taken (backup event) — ensure player is removed from available pool AND all queues
+    // Player taken (backup event)
     socket.on(SocketEvents.PLAYER_TAKEN, (payload) => {
       // Guard against potential undefined payload issues
       if (!payload?.playerId) return;
-
-      setState((prev) => {
-        // Clean up all team queues to remove the now-unavailable player
-        const updatedQueues = { ...prev.teamQueues };
-        Object.keys(updatedQueues).forEach((teamId) => {
-          updatedQueues[teamId] = (updatedQueues[teamId] || []).filter(
-            (p) => p.id !== payload.playerId
-          );
-        });
-
-        return {
-          ...prev,
-          availablePlayers: prev.availablePlayers.filter(
-            (p) => p.id !== payload.playerId
-          ),
-          teamQueues: updatedQueues,
-        };
-      });
+      setState((prev) => applyPlayerTaken(prev, payload.playerId));
     });
 
     // Order updated
@@ -433,54 +559,16 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
     });
 
     socket.on(SocketEvents.TRADE_ACCEPTED, (payload: TradeAcceptedPayload) => {
-      setState((prev) => ({
-        ...prev,
-        pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== payload.tradeId),
-        isPaused: payload.draftPaused ? true : prev.isPaused,
-        pauseReason: payload.pauseReason || prev.pauseReason,
-        teamRosters: payload.teamRosterUpdates
-          ? { ...prev.teamRosters, ...payload.teamRosterUpdates }
-          : prev.teamRosters,
-        allPicks: payload.updatedDraftOrder
-          ? (() => {
-            const pickMap = new Map(prev.allPicks.map((p) => [p.id, p]));
-            payload.updatedDraftOrder.forEach((updated) => {
-              const existing = pickMap.get(updated.id);
-              pickMap.set(updated.id, existing ? { ...existing, ...updated } : updated);
-            });
-            return Array.from(pickMap.values()).sort((a, b) => {
-              if (a.season !== b.season) return a.season - b.season;
-              return a.overallPickNumber - b.overallPickNumber;
-            });
-          })()
-          : prev.allPicks,
-        lastUpdate: new Date(),
-      }));
+      setState((prev) => applyTradeAccepted(prev, payload));
       callbacks.current.onTradeAccepted?.(payload);
     });
 
-    socket.on(SocketEvents.DRAFT_RESET, (payload: StateSyncPayload) => {
-      setState((prev) => ({
-        ...prev,
-        ...payload,
-        lastUpdate: new Date(),
-      }));
-    });
-
     socket.on(SocketEvents.TRADE_REJECTED, (payload) => {
-      setState((prev) => ({
-        ...prev,
-        pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== payload.tradeId),
-        lastUpdate: new Date(),
-      }));
+      setState((prev) => withoutTrade(prev, payload.tradeId));
     });
 
     socket.on(SocketEvents.TRADE_CANCELLED, (payload) => {
-      setState((prev) => ({
-        ...prev,
-        pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== payload.tradeId),
-        lastUpdate: new Date(),
-      }));
+      setState((prev) => withoutTrade(prev, payload.tradeId));
     });
 
     // Queue updated
@@ -497,38 +585,10 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
 
     // Team name updated
     socket.on(SocketEvents.TEAM_UPDATED, (payload) => {
-      setState((prev) => {
-        const { teamId, name } = payload;
-        
-        // Update draftOrder
-        const updatedOrder = prev.draftOrder.map(t => 
-          t.id === teamId ? { ...t, name } : t
-        );
-
-        // Update currentTeam if it matches
-        const updatedCurrentTeam = prev.currentTeam?.id === teamId 
-          ? { ...prev.currentTeam, name } 
-          : prev.currentTeam;
-
-        // Update allPicks (currentOwnerName)
-        const updatedAllPicks = prev.allPicks.map(p => 
-          p.currentOwnerId === teamId ? { ...p, currentOwnerName: name } : p
-        );
-
-        // Update completedPicks
-        const updatedCompletedPicks = prev.completedPicks.map(p => 
-          p.currentOwnerId === teamId ? { ...p, currentOwnerName: name } : p
-        );
-
-        return {
-          ...prev,
-          draftOrder: updatedOrder,
-          currentTeam: updatedCurrentTeam,
-          allPicks: updatedAllPicks,
-          completedPicks: updatedCompletedPicks,
-          lastUpdate: new Date(),
-        };
-      });
+      setState((prev) => ({
+        ...applyTeamRename(prev, payload.teamId, payload.name),
+        lastUpdate: new Date(),
+      }));
     });
 
     // Error handling
@@ -548,56 +608,33 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
   // ACTIONS
   // ==========================================================================
 
-  const actions = {
-    makePick: useCallback((playerId: string) => {
+  const makePick = useCallback(
+    (playerId: string) => {
       if (!socketRef.current || !teamId) return;
 
+      // OPTIMISTIC: fill the board, roster, and queue before the server confirms
       setState((prev) => {
-        // Find the player details for the optimistic update
         const player = prev.availablePlayers.find((p) => p.id === playerId);
         if (!player) return prev;
 
-        // 1. Construct optimistic pick for the Draft Board
-        const optimisticPick: DraftPickSummary = {
-          id: `opt-${Date.now()}`,
-          season: new Date().getFullYear(),
-          round: prev.currentRound,
-          pickInRound: 0, // Approximate
-          overallPickNumber: prev.currentPick,
-          currentOwnerId: teamId,
-          currentOwnerName: prev.currentTeam?.name || 'Me',
-          originalOwnerId: teamId,
-          isComplete: true,
-          isKeeper: false,
-          selectedPlayer: player,
-          selectedAt: new Date().toISOString(),
-        };
-
-        // 2. Add player to the team roster sidebar
-        const newRosterPlayer: RosterPlayer = { ...player, isKeeper: false, round: prev.currentRound };
-        const updatedRosters = {
-          ...prev.teamRosters,
-          [teamId]: [...(prev.teamRosters[teamId] || []), newRosterPlayer],
-        };
-
-        // 3. Update the allPicks list so the Draft Board fills in immediately
-        const updatedAllPicks = prev.allPicks.map(p => 
-          p.overallPickNumber === prev.currentPick ? optimisticPick : p
-        );
-
-        // 4. Update the queue
-        const updatedQueues = {
-          ...prev.teamQueues,
-          [teamId]: (prev.teamQueues[teamId] || []).filter(p => p.id !== playerId)
-        };
+        const optimisticPick = buildOptimisticPick(prev, teamId, player, 'opt', 'Me');
+        const rosterAddition: RosterPlayer = { ...player, isKeeper: false, round: prev.currentRound };
 
         return {
           ...prev,
           availablePlayers: prev.availablePlayers.filter((p) => p.id !== playerId),
           completedPicks: [...prev.completedPicks, optimisticPick],
-          allPicks: updatedAllPicks,
-          teamRosters: updatedRosters,
-          teamQueues: updatedQueues,
+          allPicks: prev.allPicks.map((p) =>
+            p.overallPickNumber === prev.currentPick ? optimisticPick : p
+          ),
+          teamRosters: {
+            ...prev.teamRosters,
+            [teamId]: [...(prev.teamRosters[teamId] || []), rosterAddition],
+          },
+          teamQueues: {
+            ...prev.teamQueues,
+            [teamId]: (prev.teamQueues[teamId] || []).filter((p) => p.id !== playerId),
+          },
           pendingPickId: playerId,
           currentTeamId: null, // Disable draft button until server confirms next team
           currentTeam: null,
@@ -606,18 +643,13 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
         };
       });
 
-      socketRef.current.emit(SocketEvents.PICK_MADE, {
-        leagueId,
-        playerId,
-        teamId,
-      });
-    }, [leagueId, teamId]),
+      socketRef.current.emit(SocketEvents.PICK_MADE, { leagueId, playerId, teamId });
+    },
+    [leagueId, teamId]
+  );
 
-    proposeTrade: useCallback((
-      receiverTeamId: string,
-      myAssets: { assetType: string; id: string }[],
-      theirAssets: { assetType: string; id: string }[]
-    ) => {
+  const proposeTrade = useCallback(
+    (receiverTeamId: string, myAssets: TradeAssetInput[], theirAssets: TradeAssetInput[]) => {
       if (!socketRef.current) return;
       socketRef.current.emit(SocketEvents.TRADE_OFFERED, {
         leagueId,
@@ -625,110 +657,63 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
         initiatorAssets: myAssets,
         receiverAssets: theirAssets,
       });
-    }, [leagueId]),
+    },
+    [leagueId]
+  );
 
-    acceptTrade: useCallback((tradeId: string) => {
+  const acceptTrade = useCallback(
+    (tradeId: string) => {
       if (!socketRef.current) return;
 
       // OPTIMISTIC: Move assets before server round-trip
-      setState((prev) => {
-        const trade = prev.pendingTrades.find((t) => t.tradeId === tradeId);
-        if (!trade) return prev;
-
-        const initiatorId = trade.initiatorTeam.id;
-        const receiverId = trade.receiverTeam.id;
-
-        // 1. Move Players between rosters
-        const newRosters = { ...prev.teamRosters };
-        const initiatorPlayers = [...(newRosters[initiatorId] || [])];
-        const receiverPlayers = [...(newRosters[receiverId] || [])];
-
-        trade.initiatorAssets.filter(a => a.assetType === 'PLAYER').forEach(a => {
-          const playerIndex = initiatorPlayers.findIndex(p => p.id === a.player?.id);
-          if (playerIndex !== -1) {
-            const [p] = initiatorPlayers.splice(playerIndex, 1);
-            receiverPlayers.push(p!);
-          }
-        });
-
-        trade.receiverAssets.filter(a => a.assetType === 'PLAYER').forEach(a => {
-          const playerIndex = receiverPlayers.findIndex(p => p.id === a.player?.id);
-          if (playerIndex !== -1) {
-            const [p] = receiverPlayers.splice(playerIndex, 1);
-            initiatorPlayers.push(p!);
-          }
-        });
-
-        newRosters[initiatorId] = initiatorPlayers;
-        newRosters[receiverId] = receiverPlayers;
-
-        // 2. Move Draft Picks in the allPicks board
-        const initiatorGivesPicks = new Set(trade.initiatorAssets.filter(a => a.assetType === 'DRAFT_PICK').map(a => a.id));
-        const receiverGivesPicks = new Set(trade.receiverAssets.filter(a => a.assetType === 'DRAFT_PICK').map(a => a.id));
-
-        const updatedAllPicks = prev.allPicks.map(p => {
-          if (initiatorGivesPicks.has(p.id)) {
-            return { ...p, currentOwnerId: receiverId, currentOwnerName: trade.receiverTeam.name };
-          }
-          if (receiverGivesPicks.has(p.id)) {
-            return { ...p, currentOwnerId: initiatorId, currentOwnerName: trade.initiatorTeam.name };
-          }
-          return p;
-        });
-
-        return {
-          ...prev,
-          pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== tradeId),
-          teamRosters: newRosters,
-          allPicks: updatedAllPicks,
-          lastUpdate: new Date(),
-        };
-      });
+      setState((prev) => applyOptimisticTradeAccept(prev, tradeId));
 
       socketRef.current.emit(SocketEvents.TRADE_ACCEPTED, { leagueId, tradeId });
-    }, [leagueId]),
+    },
+    [leagueId]
+  );
 
-    rejectTrade: useCallback((tradeId: string) => {
+  const rejectTrade = useCallback(
+    (tradeId: string) => {
       if (!socketRef.current) return;
 
       // OPTIMISTIC: Remove trade from list
-      setState((prev) => ({
-        ...prev,
-        pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== tradeId),
-        lastUpdate: new Date(),
-      }));
+      setState((prev) => withoutTrade(prev, tradeId));
 
       socketRef.current.emit(SocketEvents.TRADE_REJECTED, { leagueId, tradeId });
-    }, [leagueId]),
+    },
+    [leagueId]
+  );
 
-    cancelTrade: useCallback((tradeId: string) => {
+  const cancelTrade = useCallback(
+    (tradeId: string) => {
       if (!socketRef.current) return;
 
       // OPTIMISTIC: Remove trade from list
-      setState((prev) => ({
-        ...prev,
-        pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== tradeId),
-        lastUpdate: new Date(),
-      }));
+      setState((prev) => withoutTrade(prev, tradeId));
 
       socketRef.current.emit(SocketEvents.TRADE_CANCELLED, { leagueId, tradeId });
-    }, [leagueId]),
+    },
+    [leagueId]
+  );
 
-    // Commissioner actions
-    startDraft: useCallback(() => {
-      if (!socketRef.current) return;
+  // Commissioner actions
 
-      // OPTIMISTIC: Change status
-      setState((prev) => ({
-        ...prev,
-        status: 'IN_PROGRESS',
-        lastUpdate: new Date(),
-      }));
+  const startDraft = useCallback(() => {
+    if (!socketRef.current) return;
 
-      socketRef.current.emit(SocketEvents.DRAFT_START, { leagueId });
-    }, [leagueId]),
+    // OPTIMISTIC: Change status
+    setState((prev) => ({
+      ...prev,
+      status: 'IN_PROGRESS',
+      lastUpdate: new Date(),
+    }));
 
-    pauseDraft: useCallback((reason?: string) => {
+    socketRef.current.emit(SocketEvents.DRAFT_START, { leagueId });
+  }, [leagueId]);
+
+  const pauseDraft = useCallback(
+    (reason?: string) => {
       if (!socketRef.current) return;
 
       // OPTIMISTIC: Change status
@@ -740,44 +725,43 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       }));
 
       socketRef.current.emit(SocketEvents.DRAFT_PAUSE, { leagueId, reason });
-    }, [leagueId]),
+    },
+    [leagueId]
+  );
 
-    resumeDraft: useCallback(() => {
-      if (!socketRef.current) return;
+  const resumeDraft = useCallback(() => {
+    if (!socketRef.current) return;
 
-      // OPTIMISTIC: Change status
-      setState((prev) => ({
-        ...prev,
-        isPaused: false,
-        pauseReason: null,
-        lastUpdate: new Date(),
-      }));
+    // OPTIMISTIC: Change status
+    setState((prev) => ({
+      ...prev,
+      isPaused: false,
+      pauseReason: null,
+      lastUpdate: new Date(),
+    }));
 
-      socketRef.current.emit(SocketEvents.DRAFT_RESUME, { leagueId });
-    }, [leagueId]),
+    socketRef.current.emit(SocketEvents.DRAFT_RESUME, { leagueId });
+  }, [leagueId]);
 
-    resetDraft: useCallback(() => {
-      if (!socketRef.current) return;
+  const resetDraft = useCallback(() => {
+    if (!socketRef.current) return;
 
-      // OPTIMISTIC: Wipe everything locally
-      setState((prev) => ({
-        ...initialState,
-        isConnected: true,
-        allPicks: prev.allPicks.map(p => ({ 
-          ...p,
-          isComplete: false,
-          selectedPlayer: undefined,
-          selectedAt: undefined
-        })),
-        draftOrder: prev.draftOrder,
-        teamQueues: prev.teamQueues,
-        lastUpdate: new Date(),
-      }));
+    // OPTIMISTIC: Wipe everything locally, keeping connection, board slots,
+    // draft order, and queues
+    setState((prev) => ({
+      ...initialState,
+      isConnected: true,
+      allPicks: prev.allPicks.map(clearPickSelection),
+      draftOrder: prev.draftOrder,
+      teamQueues: prev.teamQueues,
+      lastUpdate: new Date(),
+    }));
 
-      socketRef.current.emit(SocketEvents.DRAFT_RESET, { leagueId });
-    }, [leagueId]),
+    socketRef.current.emit(SocketEvents.DRAFT_RESET, { leagueId });
+  }, [leagueId]);
 
-    forcePick: useCallback((playerId: string) => {
+  const forcePick = useCallback(
+    (playerId: string) => {
       if (!socketRef.current) return;
       const teamIdToDraft = state.currentTeamId;
       if (!teamIdToDraft) return;
@@ -787,125 +771,127 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
         const player = prev.availablePlayers.find((p) => p.id === playerId);
         if (!player) return prev;
 
-        const optimisticPick: DraftPickSummary = {
-          id: `opt-force-${Date.now()}`,
-          season: new Date().getFullYear(),
-          round: prev.currentRound,
-          pickInRound: 0,
-          overallPickNumber: prev.currentPick,
-          currentOwnerId: teamIdToDraft,
-          currentOwnerName: prev.currentTeam?.name || 'Forced',
-          originalOwnerId: teamIdToDraft,
-          isComplete: true,
-          isKeeper: false,
-          selectedPlayer: player,
-          selectedAt: new Date().toISOString(),
-        };
-
-        const updatedRosters = {
-          ...prev.teamRosters,
-          [teamIdToDraft]: [...(prev.teamRosters[teamIdToDraft] || []), { ...player, isKeeper: false }],
-        };
+        const optimisticPick = buildOptimisticPick(prev, teamIdToDraft, player, 'opt-force', 'Forced');
 
         return {
           ...prev,
           availablePlayers: prev.availablePlayers.filter((p) => p.id !== playerId),
           completedPicks: [...prev.completedPicks, optimisticPick],
-          allPicks: prev.allPicks.map(p => p.overallPickNumber === prev.currentPick ? optimisticPick : p),
-          teamRosters: updatedRosters,
+          allPicks: prev.allPicks.map((p) =>
+            p.overallPickNumber === prev.currentPick ? optimisticPick : p
+          ),
+          teamRosters: {
+            ...prev.teamRosters,
+            [teamIdToDraft]: [
+              ...(prev.teamRosters[teamIdToDraft] || []),
+              { ...player, isKeeper: false },
+            ],
+          },
           currentTeamId: null,
           lastUpdate: new Date(),
         };
       });
 
       socketRef.current.emit(SocketEvents.FORCE_PICK, { leagueId, playerId });
-    }, [leagueId, state.currentTeamId]),
+    },
+    [leagueId, state.currentTeamId]
+  );
 
-    undoLastPick: useCallback(() => {
-      if (!socketRef.current) return;
+  const undoLastPick = useCallback(() => {
+    if (!socketRef.current) return;
 
-      // OPTIMISTIC: Move board back one step
-      setState((prev) => {
-        const lastPick = prev.completedPicks[prev.completedPicks.length - 1];
-        if (!lastPick || !lastPick.selectedPlayer) return prev;
+    // OPTIMISTIC: Move board back one step
+    setState((prev) => {
+      const lastPick = prev.completedPicks[prev.completedPicks.length - 1];
+      if (!lastPick || !lastPick.selectedPlayer) return prev;
 
-        const player = lastPick.selectedPlayer;
-        const teamIdUnderPick = lastPick.currentOwnerId;
+      const player = lastPick.selectedPlayer;
+      const pickOwnerId = lastPick.currentOwnerId;
 
-        // Restore available player
-        const newAvailable = [...prev.availablePlayers, player].sort((a, b) => (a.rank || 9999) - (b.rank || 9999));
+      return {
+        ...prev,
+        // Restore available player, keeping the pool sorted by rank
+        availablePlayers: [...prev.availablePlayers, player].sort(
+          (a, b) => (a.rank || 9999) - (b.rank || 9999)
+        ),
+        completedPicks: prev.completedPicks.slice(0, -1),
+        allPicks: prev.allPicks.map((p) =>
+          p.overallPickNumber === lastPick.overallPickNumber ? clearPickSelection(p) : p
+        ),
+        teamRosters: {
+          ...prev.teamRosters,
+          [pickOwnerId]: (prev.teamRosters[pickOwnerId] || []).filter((p) => p.id !== player.id),
+        },
+        currentPick: lastPick.overallPickNumber,
+        currentRound: lastPick.round,
+        currentTeamId: pickOwnerId,
+        lastUpdate: new Date(),
+      };
+    });
 
-        // Remove from roster
-        const updatedRosters = { ...prev.teamRosters };
-        if (updatedRosters[teamIdUnderPick]) {
-          updatedRosters[teamIdUnderPick] = (updatedRosters[teamIdUnderPick] || []).filter(p => p.id !== player.id);
-        }
+    socketRef.current.emit(SocketEvents.PICK_UNDONE, { leagueId });
+  }, [leagueId]);
 
-        // Clear pick on board
-        const updatedAllPicks = prev.allPicks.map(p => 
-          p.overallPickNumber === lastPick.overallPickNumber ? { ...p, isComplete: false, selectedPlayer: undefined, selectedAt: undefined } : p
-        );
-
-        return {
-          ...prev,
-          availablePlayers: newAvailable,
-          completedPicks: prev.completedPicks.slice(0, -1),
-          allPicks: updatedAllPicks,
-          teamRosters: updatedRosters,
-          currentPick: lastPick.overallPickNumber,
-          currentRound: lastPick.round,
-          currentTeamId: lastPick.currentOwnerId,
-          lastUpdate: new Date(),
-        };
-      });
-
-      socketRef.current.emit(SocketEvents.PICK_UNDONE, { leagueId });
-    }, [leagueId]),
-
-    updateOrder: useCallback((teamOrder: string[]) => {
+  const updateOrder = useCallback(
+    (teamOrder: string[]) => {
       if (!socketRef.current) return;
 
       setState((prev) => {
-        const newOrder = teamOrder.map((id, index) => {
-          const team = prev.draftOrder.find(t => t.id === id);
-          return team ? { ...team, draftPosition: index + 1 } : null;
-        }).filter((t): t is TeamSummary => !!t);
+        const newOrder = teamOrder
+          .map((id, index) => {
+            const team = prev.draftOrder.find((t) => t.id === id);
+            return team ? { ...team, draftPosition: index + 1 } : null;
+          })
+          .filter((t): t is TeamSummary => !!t);
 
         return { ...prev, draftOrder: newOrder, lastUpdate: new Date() };
       });
 
       socketRef.current.emit(SocketEvents.ORDER_UPDATED, { leagueId, teamOrder });
-    }, [leagueId]),
+    },
+    [leagueId]
+  );
 
-    updateQueue: useCallback((teamId: string, playerIds: string[]) => {
+  const updateQueue = useCallback(
+    (queueTeamId: string, playerIds: string[]) => {
       if (!socketRef.current) return;
 
       // Optimistic update to prevent race conditions during rapid clicks
       setState((prev) => {
         // Collect full player objects from available players or the current queue
-        const currentQueue = prev.teamQueues[teamId] || [];
-        const updatedQueue: PlayerSummary[] = playerIds.map(id => {
-          return prev.availablePlayers.find(p => p.id === id) || 
-                 currentQueue.find(p => p.id === id);
-        }).filter((p): p is PlayerSummary => !!p);
+        const currentQueue = prev.teamQueues[queueTeamId] || [];
+        const updatedQueue = playerIds
+          .map(
+            (id) =>
+              prev.availablePlayers.find((p) => p.id === id) ||
+              currentQueue.find((p) => p.id === id)
+          )
+          .filter((p): p is PlayerSummary => !!p);
 
         return {
           ...prev,
           teamQueues: {
             ...prev.teamQueues,
-            [teamId]: updatedQueue
-          }
+            [queueTeamId]: updatedQueue,
+          },
         };
       });
 
-      socketRef.current.emit(SocketEvents.UPDATE_QUEUE, { leagueId, teamId, playerIds });
-    }, [leagueId]),
+      socketRef.current.emit(SocketEvents.UPDATE_QUEUE, {
+        leagueId,
+        teamId: queueTeamId,
+        playerIds,
+      });
+    },
+    [leagueId]
+  );
 
-    toggleQueue: useCallback((teamId: string, playerId: string) => {
+  const toggleQueue = useCallback(
+    (queueTeamId: string, playerId: string) => {
       if (!socketRef.current) return;
 
       setState((prev) => {
-        const currentQueue = prev.teamQueues[teamId] || [];
+        const currentQueue = prev.teamQueues[queueTeamId] || [];
         const isQueued = currentQueue.some((p) => p.id === playerId);
         let updatedQueue: PlayerSummary[];
 
@@ -913,59 +899,91 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
           updatedQueue = currentQueue.filter((p) => p.id !== playerId);
         } else {
           // Find the player object to add - check pool, then all picks for keepers
-          const player = prev.availablePlayers.find((p) => p.id === playerId) || 
-                         prev.allPicks.find((p) => p.selectedPlayer?.id === playerId)?.selectedPlayer;
-          
+          const player =
+            prev.availablePlayers.find((p) => p.id === playerId) ||
+            prev.allPicks.find((p) => p.selectedPlayer?.id === playerId)?.selectedPlayer;
+
           if (!player) return prev;
           updatedQueue = [...currentQueue, player];
         }
 
-        const playerIds = updatedQueue.map((p) => p.id);
-        socketRef.current?.emit(SocketEvents.UPDATE_QUEUE, { leagueId, teamId, playerIds });
+        // NOTE: emitting inside the state updater guarantees a fresh queue on
+        // rapid toggles, but React may double-invoke updaters in StrictMode,
+        // which can double-emit. Candidate for a rework.
+        socketRef.current?.emit(SocketEvents.UPDATE_QUEUE, {
+          leagueId,
+          teamId: queueTeamId,
+          playerIds: updatedQueue.map((p) => p.id),
+        });
 
         return {
           ...prev,
           teamQueues: {
             ...prev.teamQueues,
-            [teamId]: updatedQueue
-          }
+            [queueTeamId]: updatedQueue,
+          },
         };
       });
-    }, [leagueId]),
+    },
+    [leagueId]
+  );
 
-    updateTeamName: useCallback((teamId: string, name: string) => {
+  const updateTeamName = useCallback(
+    (renamedTeamId: string, name: string) => {
       if (!socketRef.current) return;
-      
-      // OPTIMISTIC UPDATE
-      setState((prev) => {
-        const updatedOrder = prev.draftOrder.map(t => t.id === teamId ? { ...t, name } : t);
-        const updatedCurrentTeam = prev.currentTeam?.id === teamId ? { ...prev.currentTeam, name } : prev.currentTeam;
-        const updatedAllPicks = prev.allPicks.map(p => p.currentOwnerId === teamId ? { ...p, currentOwnerName: name } : p);
-        const updatedCompletedPicks = prev.completedPicks.map(p => p.currentOwnerId === teamId ? { ...p, currentOwnerName: name } : p);
-        
-        return {
-          ...prev,
-          draftOrder: updatedOrder,
-          currentTeam: updatedCurrentTeam,
-          allPicks: updatedAllPicks,
-          completedPicks: updatedCompletedPicks,
-        };
-      });
 
-      socketRef.current.emit(SocketEvents.UPDATE_TEAM, { leagueId, teamId, name });
-    }, [leagueId]),
-  };
+      // OPTIMISTIC UPDATE
+      setState((prev) => applyTeamRename(prev, renamedTeamId, name));
+
+      socketRef.current.emit(SocketEvents.UPDATE_TEAM, { leagueId, teamId: renamedTeamId, name });
+    },
+    [leagueId]
+  );
+
+  // Stable identity so consumers can safely depend on `actions` in effects/memos
+  const actions = useMemo(
+    () => ({
+      makePick,
+      proposeTrade,
+      acceptTrade,
+      rejectTrade,
+      cancelTrade,
+      startDraft,
+      pauseDraft,
+      resumeDraft,
+      resetDraft,
+      forcePick,
+      undoLastPick,
+      updateOrder,
+      updateQueue,
+      toggleQueue,
+      updateTeamName,
+    }),
+    [
+      makePick,
+      proposeTrade,
+      acceptTrade,
+      rejectTrade,
+      cancelTrade,
+      startDraft,
+      pauseDraft,
+      resumeDraft,
+      resetDraft,
+      forcePick,
+      undoLastPick,
+      updateOrder,
+      updateQueue,
+      toggleQueue,
+      updateTeamName,
+    ]
+  );
 
   const disconnect = useCallback(() => {
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-    }
+    socketRef.current?.disconnect();
   }, []);
 
   const reconnect = useCallback(() => {
-    if (socketRef.current) {
-      socketRef.current.connect();
-    }
+    socketRef.current?.connect();
   }, []);
 
   return {

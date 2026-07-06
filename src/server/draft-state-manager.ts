@@ -1,7 +1,14 @@
 // Draft State Manager
 // Manages the real-time state machine for the draft
 
-import type { PrismaClient, DraftStatus, DraftType } from '@prisma/client';
+import type {
+  DraftSettings,
+  DraftStatus,
+  Player,
+  Prisma,
+  PrismaClient,
+  TradeAssetType,
+} from '@prisma/client';
 import type { Server } from 'socket.io';
 import type {
   ServerToClientEvents,
@@ -13,11 +20,14 @@ import type {
   DraftPickSummary,
   PlayerSummary,
   RosterPlayer,
+  RosterSettings,
   PickMadePayload,
   OnTheClockPayload,
   DraftStartPayload,
   DraftPausePayload,
   OrderUpdatedPayload,
+  TradeAssetPayload,
+  TradeOfferedPayload,
 } from '@/types/socket';
 import { SocketEvents } from '@/types/socket';
 
@@ -39,21 +49,156 @@ interface DraftStateCache {
   timerStartedAt: Date | null;
 }
 
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const DEFAULT_TIMER_SECONDS = 90;
+const DEFAULT_TOTAL_ROUNDS = 14;
+
+const DEFAULT_DRAFT_STATE: DraftStateCache = {
+  status: 'NOT_STARTED',
+  currentRound: 1,
+  currentPick: 1,
+  currentTeamId: null,
+  isPaused: false,
+  pauseReason: null,
+  timerSecondsRemaining: null,
+  timerStartedAt: null,
+};
+
+const CORE_POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'] as const;
+type CorePosition = (typeof CORE_POSITIONS)[number];
+
+// Fungible starter slots accept several positions; fill order matters and must
+// stay stable (RB→WR→TE, then QB→RB→WR→TE) for restriction math to be deterministic.
+const FLEX_ELIGIBLE: readonly CorePosition[] = ['RB', 'WR', 'TE'];
+const SUPERFLEX_ELIGIBLE: readonly CorePosition[] = ['QB', 'RB', 'WR', 'TE'];
+
+// =============================================================================
+// ROW SHAPES & PURE MAPPERS
+// =============================================================================
+
+interface TeamRecord {
+  id: string;
+  name: string;
+  ownerId: string | null;
+  draftPosition: number | null;
+  owner: { name: string | null } | null;
+}
+
+interface RosterEntryWithPlayer {
+  isKeeper: boolean;
+  keeperRound: number | null;
+  player: Player;
+}
+
+interface TradeAssetRecord {
+  id: string;
+  assetType: TradeAssetType;
+  fromTeamId: string;
+  futurePickSeason: number | null;
+  futurePickRound: number | null;
+  draftPick: {
+    id: string;
+    round: number;
+    season: number;
+    overallPickNumber: number | null;
+  } | null;
+  player: Player | null;
+}
+
+function toPlayerSummary(player: Player): PlayerSummary {
+  return {
+    id: player.id,
+    sleeperId: player.sleeperId,
+    fullName: player.fullName,
+    position: player.position,
+    nflTeam: player.nflTeam,
+    rank: player.rank,
+    adp: player.adp,
+    bye: player.byeWeek,
+  };
+}
+
+function toRosterPlayer(entry: RosterEntryWithPlayer): RosterPlayer {
+  return {
+    ...toPlayerSummary(entry.player),
+    injuryStatus: entry.player.injuryStatus,
+    isKeeper: entry.isKeeper,
+    round: entry.keeperRound ?? undefined,
+  };
+}
+
+function toTeamSummary(team: TeamRecord): TeamSummary {
+  return {
+    id: team.id,
+    name: team.name,
+    ownerId: team.ownerId,
+    ownerName: team.owner?.name || 'Open Slot',
+    draftPosition: team.draftPosition || 0,
+  };
+}
+
+function toTradeAssetPayload(asset: TradeAssetRecord, fromTeamName: string): TradeAssetPayload {
+  return {
+    id: asset.id,
+    assetType: asset.assetType,
+    fromTeamId: asset.fromTeamId,
+    fromTeamName,
+    draftPick: asset.draftPick
+      ? {
+          id: asset.draftPick.id,
+          round: asset.draftPick.round,
+          season: asset.draftPick.season,
+          overallPickNumber: asset.draftPick.overallPickNumber ?? undefined,
+        }
+      : undefined,
+    player: asset.player ? toPlayerSummary(asset.player) : undefined,
+    futurePickSeason: asset.futurePickSeason ?? undefined,
+    futurePickRound: asset.futurePickRound ?? undefined,
+  };
+}
+
+function toRosterSettings(settings: DraftSettings): RosterSettings {
+  return {
+    qbCount: settings.qbCount,
+    rbCount: settings.rbCount,
+    wrCount: settings.wrCount,
+    teCount: settings.teCount,
+    flexCount: settings.flexCount,
+    superflexCount: settings.superflexCount,
+    kCount: settings.kCount,
+    defCount: settings.defCount,
+    benchCount: settings.benchCount,
+  };
+}
+
+function timerDurationOf(settings: Pick<DraftSettings, 'timerDurationSeconds'> | null): number {
+  return settings?.timerDurationSeconds || DEFAULT_TIMER_SECONDS;
+}
+
+// Legacy data sources use DST for team defenses; the app standardizes on DEF.
+function normalizePosition(position: string): string {
+  return position === 'DST' ? 'DEF' : position;
+}
+
+function isCorePosition(position: string): position is CorePosition {
+  return (CORE_POSITIONS as readonly string[]).includes(position);
+}
+
 export class DraftStateManager {
-  private leagueId: string;
-  private prisma: PrismaClient;
-  private io: TypedServer;
   private timerInterval: NodeJS.Timeout | null = null;
   private stateCache: DraftStateCache | null = null;
 
-  constructor(leagueId: string, prisma: PrismaClient, io: TypedServer) {
-    this.leagueId = leagueId;
-    this.prisma = prisma;
-    this.io = io;
-  }
+  constructor(
+    private readonly leagueId: string,
+    private readonly prisma: PrismaClient,
+    private readonly io: TypedServer
+  ) {}
 
-  private getRoomName(): string {
-    return `draft:${this.leagueId}`;
+  private get room() {
+    return this.io.to(`draft:${this.leagueId}`);
   }
 
   // ===========================================================================
@@ -70,17 +215,7 @@ export class DraftStateManager {
     });
 
     if (!state) {
-      // Return default state if none exists
-      return {
-        status: 'NOT_STARTED',
-        currentRound: 1,
-        currentPick: 1,
-        currentTeamId: null,
-        isPaused: false,
-        pauseReason: null,
-        timerSecondsRemaining: null,
-        timerStartedAt: null,
-      };
+      return { ...DEFAULT_DRAFT_STATE };
     }
 
     this.stateCache = {
@@ -101,13 +236,12 @@ export class DraftStateManager {
     this.stateCache = null;
   }
 
+  // Realigns currentTeamId with the actual owner of the current pick (e.g. after
+  // a trade moves the pick on the clock) and restarts the timer if needed.
   async syncCurrentTeam(): Promise<string | null> {
     const state = await this.getCurrentState();
 
-    console.log(`[syncCurrentTeam] status=${state.status}, currentPick=${state.currentPick}, currentTeamId=${state.currentTeamId}`);
-
     if (state.status !== 'IN_PROGRESS' && state.status !== 'PAUSED') {
-      console.log(`[syncCurrentTeam] Early return - status is ${state.status}`);
       return state.currentTeamId;
     }
 
@@ -123,68 +257,67 @@ export class DraftStateManager {
       }),
     ]);
 
-    console.log(`[syncCurrentTeam] pick currentOwnerId=${currentPick?.currentOwnerId}, state currentTeamId=${state.currentTeamId}, match=${currentPick?.currentOwnerId === state.currentTeamId}`);
-
-    if (currentPick && currentPick.currentOwnerId !== state.currentTeamId) {
-      console.log(`[DraftStateManager] Syncing current team: ${state.currentTeamId} -> ${currentPick.currentOwnerId}`);
-
-      const timerDuration = settings?.timerDurationSeconds || 90;
-      const now = new Date();
-
-      await this.prisma.draftState.update({
-        where: { leagueId: this.leagueId },
-        data: {
-          currentTeamId: currentPick.currentOwnerId,
-          timerSecondsRemaining: timerDuration,
-          timerStartedAt: state.status === 'IN_PROGRESS' ? now : null,
-        },
-      });
-
-      this.stateCache = null;
-      const newState = await this.getCurrentState();
-
-      // Broadcast update to all clients
-      const teams = await this.getTeamsWithOrder();
-      const team = teams.find((t) => t.id === currentPick.currentOwnerId);
-
-      if (team) {
-        const payload: OnTheClockPayload = {
-          leagueId: this.leagueId,
-          teamId: team.id,
-          team: team,
-          pickNumber: newState.currentPick,
-          round: newState.currentRound,
-          timerDuration: timerDuration,
-          timerStartedAt: newState.timerStartedAt?.toISOString() || now.toISOString(),
-        };
-
-        this.io.to(this.getRoomName()).emit(SocketEvents.ON_THE_CLOCK, payload);
-      }
-
-      // If draft is in progress, restart the timer with full duration
-      if (state.status === 'IN_PROGRESS') {
-        this.startTimer(timerDuration);
-      }
-
-      return currentPick.currentOwnerId;
+    if (!currentPick || currentPick.currentOwnerId === state.currentTeamId) {
+      return state.currentTeamId;
     }
 
-    return state.currentTeamId;
+    console.log(
+      `[DraftStateManager] Syncing current team: ${state.currentTeamId} -> ${currentPick.currentOwnerId}`
+    );
+
+    const timerDuration = timerDurationOf(settings);
+    const now = new Date();
+
+    await this.prisma.draftState.update({
+      where: { leagueId: this.leagueId },
+      data: {
+        currentTeamId: currentPick.currentOwnerId,
+        timerSecondsRemaining: timerDuration,
+        timerStartedAt: state.status === 'IN_PROGRESS' ? now : null,
+      },
+    });
+
+    this.clearStateCache();
+    const newState = await this.getCurrentState();
+
+    // Broadcast update to all clients
+    const teams = await this.getTeamsWithOrder();
+    const team = teams.find((t) => t.id === currentPick.currentOwnerId);
+
+    if (team) {
+      const payload: OnTheClockPayload = {
+        leagueId: this.leagueId,
+        teamId: team.id,
+        team,
+        pickNumber: newState.currentPick,
+        round: newState.currentRound,
+        timerDuration,
+        timerStartedAt: newState.timerStartedAt?.toISOString() || now.toISOString(),
+      };
+
+      this.room.emit(SocketEvents.ON_THE_CLOCK, payload);
+    }
+
+    // If draft is in progress, restart the timer with full duration
+    if (state.status === 'IN_PROGRESS') {
+      this.startTimer(timerDuration);
+    }
+
+    return currentPick.currentOwnerId;
   }
 
   async getFullState(): Promise<StateSyncPayload> {
-    const [state, settings, teams, allPicks, players, pendingTrades, teamRosters, teamQueues] = await Promise.all([
-      this.getCurrentState(),
-      this.prisma.draftSettings.findUnique({ where: { leagueId: this.leagueId } }),
-      this.getTeamsWithOrder(),
-      this.getAllPicks(),
-      this.getAvailablePlayers(),
-      this.getPendingTrades(),
-      this.getTeamRosters(),
-      this.getTeamQueues(),
-    ]);
-
-    const completedPicks = allPicks.filter(p => p.isComplete);
+    const [state, settings, teams, allPicks, players, pendingTrades, teamRosters, teamQueues] =
+      await Promise.all([
+        this.getCurrentState(),
+        this.prisma.draftSettings.findUnique({ where: { leagueId: this.leagueId } }),
+        this.getTeamsWithOrder(),
+        this.getAllPicks(),
+        this.getAvailablePlayers(),
+        this.getPendingTrades(),
+        this.getTeamRosters(),
+        this.getTeamQueues(),
+      ]);
 
     const currentTeam = state.currentTeamId
       ? teams.find((t) => t.id === state.currentTeamId) || null
@@ -201,26 +334,15 @@ export class DraftStateManager {
       pauseReason: state.pauseReason,
       timerSecondsRemaining: state.timerSecondsRemaining,
       draftOrder: teams,
-      completedPicks,
+      completedPicks: allPicks.filter((p) => p.isComplete),
       allPicks,
       availablePlayers: players,
       teamRosters,
       pendingTrades,
-      totalRounds: settings?.totalRounds || 14,
-      draftType: (settings?.draftType as 'SNAKE' | 'LINEAR') || 'SNAKE',
+      totalRounds: settings?.totalRounds || DEFAULT_TOTAL_ROUNDS,
+      draftType: (settings?.draftType as 'SNAKE' | 'LINEAR' | undefined) || 'SNAKE',
       teamQueues,
-      // Map roster settings from database (requires generated prisma client to be in sync)
-      rosterSettings: settings ? {
-        qbCount: settings.qbCount,
-        rbCount: settings.rbCount,
-        wrCount: settings.wrCount,
-        teCount: settings.teCount,
-        flexCount: settings.flexCount,
-        superflexCount: settings.superflexCount,
-        kCount: settings.kCount,
-        defCount: settings.defCount,
-        benchCount: settings.benchCount,
-      } : undefined,
+      rosterSettings: settings ? toRosterSettings(settings) : undefined,
       timestamp: new Date().toISOString(),
     };
   }
@@ -232,13 +354,7 @@ export class DraftStateManager {
       orderBy: { draftPosition: 'asc' },
     });
 
-    return teams.map((team) => ({
-      id: team.id,
-      name: team.name,
-      ownerId: team.ownerId,
-      ownerName: team.owner?.name || 'Open Slot',
-      draftPosition: team.draftPosition || 0,
-    }));
+    return teams.map(toTeamSummary);
   }
 
   async getTeamRoster(teamId: string): Promise<RosterPlayer[]> {
@@ -247,26 +363,12 @@ export class DraftStateManager {
       include: { player: true },
     });
 
-    return rosters.map((r) => ({
-      id: r.player.id,
-      sleeperId: r.player.sleeperId,
-      fullName: r.player.fullName,
-      position: r.player.position,
-      nflTeam: r.player.nflTeam,
-      rank: r.player.rank,
-      adp: r.player.adp,
-      bye: r.player.byeWeek,
-      injuryStatus: r.player.injuryStatus,
-      isKeeper: r.isKeeper,
-      round: r.keeperRound || undefined,
-    }));
+    return rosters.map(toRosterPlayer);
   }
 
   private async getAllPicks(): Promise<DraftPickSummary[]> {
     const picks = await this.prisma.draftPick.findMany({
-      where: {
-        leagueId: this.leagueId,
-      },
+      where: { leagueId: this.leagueId },
       include: {
         currentOwner: { include: { owner: { select: { name: true } } } },
         originalOwner: true,
@@ -274,19 +376,20 @@ export class DraftStateManager {
       orderBy: { overallPickNumber: 'asc' },
     });
 
-    // Get selected players for completed picks
-    const playerIds = picks
-      .filter((p) => p.selectedPlayerId)
-      .map((p) => p.selectedPlayerId as string);
+    // DraftPick has no relation to Player for selectedPlayerId, so resolve
+    // selected players with a second query.
+    const selectedPlayerIds = picks
+      .map((pick) => pick.selectedPlayerId)
+      .filter((id): id is string => id !== null);
 
-    const players = await this.prisma.player.findMany({
-      where: { id: { in: playerIds } },
-    });
+    const players = selectedPlayerIds.length
+      ? await this.prisma.player.findMany({ where: { id: { in: selectedPlayerIds } } })
+      : [];
 
-    const playerMap = new Map(players.map((p) => [p.id, p]));
+    const playerById = new Map(players.map((p) => [p.id, p]));
 
     return picks.map((pick) => {
-      const player = pick.selectedPlayerId ? playerMap.get(pick.selectedPlayerId) : null;
+      const player = pick.selectedPlayerId ? playerById.get(pick.selectedPlayerId) : undefined;
       return {
         id: pick.id,
         season: pick.season,
@@ -298,18 +401,7 @@ export class DraftStateManager {
         originalOwnerId: pick.originalOwnerId,
         isComplete: pick.isComplete,
         isKeeper: pick.isKeeper,
-        selectedPlayer: player
-          ? {
-            id: player.id,
-            sleeperId: player.sleeperId,
-            fullName: player.fullName,
-            position: player.position,
-            nflTeam: player.nflTeam,
-            rank: player.rank,
-            adp: player.adp,
-            bye: player.byeWeek,
-          }
-          : undefined,
+        selectedPlayer: player ? toPlayerSummary(player) : undefined,
         selectedAt: pick.selectedAt?.toISOString(),
       };
     });
@@ -322,25 +414,9 @@ export class DraftStateManager {
     });
 
     const rostersByTeam: Record<string, RosterPlayer[]> = {};
-    rosters.forEach((r) => {
-      if (!rostersByTeam[r.teamId]) rostersByTeam[r.teamId] = [];
-      const teamRoster = rostersByTeam[r.teamId];
-      if (teamRoster) {
-        teamRoster.push({
-          id: r.player.id,
-          sleeperId: r.player.sleeperId,
-          fullName: r.player.fullName,
-          position: r.player.position,
-          nflTeam: r.player.nflTeam,
-          rank: r.player.rank,
-          adp: r.player.adp,
-          bye: r.player.byeWeek,
-          injuryStatus: r.player.injuryStatus,
-          isKeeper: r.isKeeper,
-          round: r.keeperRound || undefined,
-        });
-      }
-    });
+    for (const entry of rosters) {
+      (rostersByTeam[entry.teamId] ??= []).push(toRosterPlayer(entry));
+    }
     return rostersByTeam;
   }
 
@@ -356,57 +432,47 @@ export class DraftStateManager {
         select: { selectedPlayerId: true },
       }),
       this.prisma.playerRoster.findMany({
-        where: {
-          leagueId: this.leagueId,
+        where: { leagueId: this.leagueId },
+        select: {
+          playerId: true,
+          isKeeper: true,
+          acquiredVia: true,
+          team: { select: { name: true } },
         },
-        select: { playerId: true, isKeeper: true, acquiredVia: true, team: { select: { name: true } } },
       }),
     ]);
 
     const excludeIds = new Set<string>();
 
-    // Exclude drafted players
-    for (const p of draftedPicks) {
-      if (p.selectedPlayerId) excludeIds.add(p.selectedPlayerId);
+    for (const pick of draftedPicks) {
+      if (pick.selectedPlayerId) excludeIds.add(pick.selectedPlayerId);
     }
 
     // Exclude only keepers and draft-acquired players — not pre-draft marketplace entries (FREE_AGENT)
-    const keeperMap = new Map<string, string>();
-    for (const r of allRosteredPlayers) {
-      if (r.isKeeper || r.acquiredVia !== 'FREE_AGENT') {
-        excludeIds.add(r.playerId);
+    const keeperTeamByPlayerId = new Map<string, string>();
+    for (const entry of allRosteredPlayers) {
+      if (entry.isKeeper || entry.acquiredVia !== 'FREE_AGENT') {
+        excludeIds.add(entry.playerId);
       }
-      if (r.isKeeper) {
-        keeperMap.set(r.playerId, r.team.name);
+      if (entry.isKeeper) {
+        keeperTeamByPlayerId.set(entry.playerId, entry.team.name);
       }
     }
 
     // Sort with nulls last so ranked players come before unranked ones
     const players = await this.prisma.player.findMany({
-      where: {
-        id: { notIn: Array.from(excludeIds) },
-      },
-      orderBy: [
-        { rank: { sort: 'asc', nulls: 'last' } },
-        { fullName: 'asc' }
-      ],
+      where: { id: { notIn: Array.from(excludeIds) } },
+      orderBy: [{ rank: { sort: 'asc', nulls: 'last' } }, { fullName: 'asc' }],
       take: 2000,
     });
 
     return players.map((player) => ({
-      id: player.id,
-      sleeperId: player.sleeperId,
-      fullName: player.fullName,
-      position: player.position,
-      nflTeam: player.nflTeam,
-      rank: player.rank,
-      adp: player.adp,
-      bye: player.byeWeek,
-      keptByTeam: keeperMap.get(player.id) || null,
+      ...toPlayerSummary(player),
+      keptByTeam: keeperTeamByPlayerId.get(player.id) ?? null,
     }));
   }
 
-  private async getPendingTrades(): Promise<any[]> {
+  private async getPendingTrades(): Promise<TradeOfferedPayload[]> {
     const trades = await this.prisma.trade.findMany({
       where: {
         leagueId: this.leagueId,
@@ -427,26 +493,14 @@ export class DraftStateManager {
     return trades.map((trade) => ({
       leagueId: this.leagueId,
       tradeId: trade.id,
-      initiatorTeam: {
-        id: trade.initiatorTeam.id,
-        name: trade.initiatorTeam.name,
-        ownerId: trade.initiatorTeam.ownerId,
-        ownerName: trade.initiatorTeam.owner?.name || 'Open Slot',
-        draftPosition: trade.initiatorTeam.draftPosition || 0,
-      },
-      receiverTeam: {
-        id: trade.receiverTeam.id,
-        name: trade.receiverTeam.name,
-        ownerId: trade.receiverTeam.ownerId,
-        ownerName: trade.receiverTeam.owner?.name || 'Open Slot',
-        draftPosition: trade.receiverTeam.draftPosition || 0,
-      },
+      initiatorTeam: toTeamSummary(trade.initiatorTeam),
+      receiverTeam: toTeamSummary(trade.receiverTeam),
       initiatorAssets: trade.assets
-        .filter((a) => a.fromTeamId === trade.initiatorTeamId)
-        .map((a) => this.mapAsset(a)),
+        .filter((asset) => asset.fromTeamId === trade.initiatorTeamId)
+        .map((asset) => toTradeAssetPayload(asset, trade.initiatorTeam.name)),
       receiverAssets: trade.assets
-        .filter((a) => a.fromTeamId === trade.receiverTeamId)
-        .map((a) => this.mapAsset(a)),
+        .filter((asset) => asset.fromTeamId === trade.receiverTeamId)
+        .map((asset) => toTradeAssetPayload(asset, trade.receiverTeam.name)),
       expiresAt: trade.expiresAt?.toISOString(),
       timestamp: trade.proposedAt.toISOString(),
     }));
@@ -454,35 +508,17 @@ export class DraftStateManager {
 
   private async getTeamQueues(): Promise<Record<string, PlayerSummary[]>> {
     const allQueues = await this.prisma.draftQueue.findMany({
-      where: {
-        team: { leagueId: this.leagueId }
-      },
-      include: {
-        player: true,
-      },
-      orderBy: { rank: 'asc' }
+      where: { team: { leagueId: this.leagueId } },
+      include: { player: true },
+      orderBy: { rank: 'asc' },
     });
 
     const queuesByTeam: Record<string, PlayerSummary[]> = {};
     for (const item of allQueues) {
-      if (!queuesByTeam[item.teamId]) {
-        queuesByTeam[item.teamId] = [];
-      }
-
-      const teamQueue = queuesByTeam[item.teamId];
-      if (teamQueue) {
-        teamQueue.push({
-          id: item.player.id,
-          sleeperId: item.player.sleeperId,
-          fullName: item.player.fullName,
-          position: item.player.position,
-          nflTeam: item.player.nflTeam,
-          rank: item.player.rank,
-          adp: item.player.adp,
-          bye: item.player.byeWeek,
-          keptByTeam: null,
-        });
-      }
+      (queuesByTeam[item.teamId] ??= []).push({
+        ...toPlayerSummary(item.player),
+        keptByTeam: null,
+      });
     }
     return queuesByTeam;
   }
@@ -495,81 +531,39 @@ export class DraftStateManager {
     // Two concurrent calls can safely upsert over each other without constraint errors.
     await this.prisma.$transaction(async (tx) => {
       // Upsert each player entry (update rank if exists, create if not)
-      for (let i = 0; i < uniquePlayerIds.length; i++) {
-        const playerId = uniquePlayerIds[i]!;
+      for (const [rank, playerId] of uniquePlayerIds.entries()) {
         await tx.draftQueue.upsert({
           where: {
             teamId_playerId: { teamId, playerId },
           },
-          update: { rank: i },
-          create: { teamId, playerId, rank: i },
+          update: { rank },
+          create: { teamId, playerId, rank },
         });
       }
 
       // Remove any entries NOT in the updated list
-      if (uniquePlayerIds.length > 0) {
-        await tx.draftQueue.deleteMany({
-          where: {
-            teamId,
-            playerId: { notIn: uniquePlayerIds },
-          },
-        });
-      } else {
-        await tx.draftQueue.deleteMany({ where: { teamId } });
-      }
+      await tx.draftQueue.deleteMany({
+        where:
+          uniquePlayerIds.length > 0
+            ? { teamId, playerId: { notIn: uniquePlayerIds } }
+            : { teamId },
+      });
     });
 
     const updatedQueue = await this.prisma.draftQueue.findMany({
       where: { teamId },
       include: { player: true },
-      orderBy: { rank: 'asc' }
+      orderBy: { rank: 'asc' },
     });
 
-    const mappedQueue: PlayerSummary[] = updatedQueue.map((item) => ({
-      id: item.player.id,
-      sleeperId: item.player.sleeperId,
-      fullName: item.player.fullName,
-      position: item.player.position,
-      nflTeam: item.player.nflTeam,
-      rank: item.player.rank,
-      adp: item.player.adp,
-      bye: item.player.byeWeek,
-      keptByTeam: null
-    }));
-
-    this.io.to(this.getRoomName()).emit(SocketEvents.QUEUE_UPDATED, {
+    this.room.emit(SocketEvents.QUEUE_UPDATED, {
       leagueId: this.leagueId,
       teamId,
-      queue: mappedQueue
+      queue: updatedQueue.map((item) => ({
+        ...toPlayerSummary(item.player),
+        keptByTeam: null,
+      })),
     });
-  }
-
-  private mapAsset(asset: any): any {
-    return {
-      id: asset.id,
-      assetType: asset.assetType,
-      fromTeamId: asset.fromTeamId,
-      draftPick: asset.draftPick
-        ? {
-          id: asset.draftPick.id,
-          round: asset.draftPick.round,
-          season: asset.draftPick.season,
-          overallPickNumber: asset.draftPick.overallPickNumber,
-        }
-        : undefined,
-      player: asset.player
-        ? {
-          id: asset.player.id,
-          sleeperId: asset.player.sleeperId,
-          fullName: asset.player.fullName,
-          position: asset.player.position,
-          nflTeam: asset.player.nflTeam,
-          rank: asset.player.rank,
-        }
-        : undefined,
-      futurePickSeason: asset.futurePickSeason,
-      futurePickRound: asset.futurePickRound,
-    };
   }
 
   // ===========================================================================
@@ -579,7 +573,6 @@ export class DraftStateManager {
   async startDraft(): Promise<void> {
     console.log(`[DraftStateManager] Starting draft for league ${this.leagueId}...`);
 
-    // 1. Check current status
     const state = await this.getCurrentState();
     if (state.status !== 'NOT_STARTED') {
       console.warn(`[DraftStateManager] Cannot start draft - current status is ${state.status}`);
@@ -598,28 +591,21 @@ export class DraftStateManager {
     this.clearStateCache();
 
     try {
-      // Get teams in draft order
       const teams = await this.getTeamsWithOrder();
       if (teams.length === 0) {
         throw new Error('No teams in league');
       }
 
-      // 2. PROCESS KEEPERS (Simple check)
       const allKeepersCount = await this.prisma.playerRoster.count({
-        where: {
-          leagueId: this.leagueId,
-          isKeeper: true,
-        },
+        where: { leagueId: this.leagueId, isKeeper: true },
       });
+      console.log(
+        `[startDraft] Found ${allKeepersCount} keepers on rosters. Starting draft for remaining spots.`
+      );
 
-      console.log(`[startDraft] Found ${allKeepersCount} keepers on rosters. Starting draft for remaining spots.`);
-
-      // 3. Find the first AVAILABLE pick after processing keepers
+      // Find the first available pick after keepers are accounted for
       const firstPick = await this.prisma.draftPick.findFirst({
-        where: {
-          leagueId: this.leagueId,
-          isComplete: false,
-        },
+        where: { leagueId: this.leagueId, isComplete: false },
         orderBy: { overallPickNumber: 'asc' },
       });
 
@@ -632,59 +618,41 @@ export class DraftStateManager {
           update: { status: 'COMPLETED' },
         });
         this.clearStateCache();
-        this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_COMPLETE, {
+        this.room.emit(SocketEvents.DRAFT_COMPLETE, {
           leagueId: this.leagueId,
           completedAt: new Date().toISOString(),
         });
         return;
       }
 
-      const firstTeamOnClock = teams.find(t => t.id === firstPick.currentOwnerId) || teams[0];
+      const firstTeamOnClock = teams.find((t) => t.id === firstPick.currentOwnerId) || teams[0];
       if (!firstTeamOnClock) {
         throw new Error('Could not determine first team on clock');
       }
       const now = new Date();
 
-      // 4. Update draft state to IN_PROGRESS
+      const inProgressState = {
+        status: 'IN_PROGRESS' as const,
+        currentRound: firstPick.round || 1,
+        currentPick: firstPick.overallPickNumber || 1,
+        currentTeamId: firstTeamOnClock.id,
+        isPaused: false,
+        timerStartedAt: now,
+        timerSecondsRemaining: settings.timerDurationSeconds,
+        startedAt: now,
+        lastActivityAt: now,
+      };
+
       await this.prisma.draftState.upsert({
         where: { leagueId: this.leagueId },
-        create: {
-          leagueId: this.leagueId,
-          status: 'IN_PROGRESS',
-          currentRound: firstPick.round || 1,
-          currentPick: firstPick.overallPickNumber || 1,
-          currentTeamId: firstTeamOnClock.id,
-          isPaused: false,
-          timerStartedAt: now,
-          timerSecondsRemaining: settings.timerDurationSeconds,
-          startedAt: now,
-          lastActivityAt: now,
-        },
-        update: {
-          status: 'IN_PROGRESS',
-          currentRound: firstPick.round || 1,
-          currentPick: firstPick.overallPickNumber || 1,
-          currentTeamId: firstTeamOnClock.id,
-          isPaused: false,
-          timerStartedAt: now,
-          timerSecondsRemaining: settings.timerDurationSeconds,
-          startedAt: now,
-          lastActivityAt: now,
-        },
+        create: { leagueId: this.leagueId, ...inProgressState },
+        update: inProgressState,
       });
 
       this.clearStateCache();
 
-      // Log activity
-      await this.prisma.draftActivityLog.create({
-        data: {
-          leagueId: this.leagueId,
-          activityType: 'DRAFT_STARTED',
-          description: 'Draft started',
-        },
-      });
+      await this.logActivity('DRAFT_STARTED', 'Draft started');
 
-      // 5. Broadcast draft start
       const payload: DraftStartPayload = {
         leagueId: this.leagueId,
         startedAt: now.toISOString(),
@@ -695,12 +663,12 @@ export class DraftStateManager {
         draftOrder: teams,
       };
 
-      this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_START, payload);
-      this.startTimer(settings.timerDurationSeconds || 90);
+      this.room.emit(SocketEvents.DRAFT_START, payload);
+      this.startTimer(timerDurationOf(settings));
 
       // Also broadcast full state to ensure everyone has up-to-date picks/keepers/players
       const fullState = await this.getFullState();
-      this.io.to(this.getRoomName()).emit(SocketEvents.STATE_SYNC, fullState);
+      this.room.emit(SocketEvents.STATE_SYNC, fullState);
 
       console.log(`[DraftStateManager] Draft successfully started for league ${this.leagueId}.`);
     } catch (error) {
@@ -709,21 +677,18 @@ export class DraftStateManager {
     }
   }
 
-
   async pauseDraft(reason: string, pausedBy: string): Promise<void> {
     const state = await this.getCurrentState();
 
-    // Calculate remaining time
+    // Freeze the clock: subtract time elapsed since the timer last started
     let remainingTime = state.timerSecondsRemaining || 0;
     if (state.timerStartedAt && !state.isPaused) {
       const elapsed = Math.floor((Date.now() - state.timerStartedAt.getTime()) / 1000);
       remainingTime = Math.max(0, (state.timerSecondsRemaining || 0) - elapsed);
     }
 
-    // Stop the timer
     this.stopTimer();
 
-    // Update state
     await this.prisma.draftState.update({
       where: { leagueId: this.leagueId },
       data: {
@@ -737,17 +702,10 @@ export class DraftStateManager {
 
     this.clearStateCache();
 
-    // Log activity
-    await this.prisma.draftActivityLog.create({
-      data: {
-        leagueId: this.leagueId,
-        activityType: 'DRAFT_PAUSED',
-        description: `Draft paused: ${reason}`,
-        triggeredById: pausedBy === 'system' ? null : pausedBy,
-      },
+    await this.logActivity('DRAFT_PAUSED', `Draft paused: ${reason}`, {
+      triggeredById: pausedBy === 'system' ? null : pausedBy,
     });
 
-    // Broadcast pause
     const payload: DraftPausePayload = {
       leagueId: this.leagueId,
       isPaused: true,
@@ -757,7 +715,7 @@ export class DraftStateManager {
       timestamp: new Date().toISOString(),
     };
 
-    this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_PAUSE, payload);
+    this.room.emit(SocketEvents.DRAFT_PAUSE, payload);
   }
 
   async resumeDraft(): Promise<void> {
@@ -766,9 +724,8 @@ export class DraftStateManager {
       where: { leagueId: this.leagueId },
     });
 
-    const remainingTime = state.timerSecondsRemaining || settings?.timerDurationSeconds || 90;
+    const remainingTime = state.timerSecondsRemaining || timerDurationOf(settings);
 
-    // Update state
     await this.prisma.draftState.update({
       where: { leagueId: this.leagueId },
       data: {
@@ -782,16 +739,8 @@ export class DraftStateManager {
 
     this.clearStateCache();
 
-    // Log activity
-    await this.prisma.draftActivityLog.create({
-      data: {
-        leagueId: this.leagueId,
-        activityType: 'DRAFT_RESUMED',
-        description: 'Draft resumed',
-      },
-    });
+    await this.logActivity('DRAFT_RESUMED', 'Draft resumed');
 
-    // Broadcast resume
     const payload: DraftPausePayload = {
       leagueId: this.leagueId,
       isPaused: false,
@@ -799,9 +748,8 @@ export class DraftStateManager {
       timestamp: new Date().toISOString(),
     };
 
-    this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_RESUME, payload);
+    this.room.emit(SocketEvents.DRAFT_RESUME, payload);
 
-    // Restart the timer
     this.startTimer(remainingTime);
   }
 
@@ -809,14 +757,12 @@ export class DraftStateManager {
   // PICK MANAGEMENT
   // ===========================================================================
 
+  // NOTE: currently unused — makePick inlines its own authorization checks.
+  // Kept for API completeness; candidate for removal.
   async canTeamPick(teamId: string, isCommissioner: boolean): Promise<boolean> {
     const state = await this.getCurrentState();
 
-    if (state.status !== 'IN_PROGRESS') {
-      return false;
-    }
-
-    if (state.isPaused) {
+    if (state.status !== 'IN_PROGRESS' || state.isPaused) {
       return false;
     }
 
@@ -825,7 +771,6 @@ export class DraftStateManager {
       return true;
     }
 
-    // Get the current pick
     const currentPick = await this.prisma.draftPick.findFirst({
       where: {
         leagueId: this.leagueId,
@@ -834,23 +779,16 @@ export class DraftStateManager {
       },
     });
 
-    if (!currentPick) {
-      return false;
-    }
-
-    return currentPick.currentOwnerId === teamId;
+    return currentPick?.currentOwnerId === teamId;
   }
 
   async makePick(teamId: string, playerId: string, isCommissioner: boolean = false): Promise<void> {
     // --- Phase 1: Parallel pre-validation ---
     const [state, settings] = await Promise.all([
       this.getCurrentState(),
-      this.prisma.draftSettings.findUnique({
-        where: { leagueId: this.leagueId },
-      }),
+      this.prisma.draftSettings.findUnique({ where: { leagueId: this.leagueId } }),
     ]);
 
-    // Authorization check (inline — avoids separate canTeamPick DB queries)
     if (state.status !== 'IN_PROGRESS') {
       throw new Error('Draft is not in progress');
     }
@@ -871,9 +809,7 @@ export class DraftStateManager {
           currentOwner: { include: { owner: { select: { name: true } } } },
         },
       }),
-      this.prisma.player.findUnique({
-        where: { id: playerId },
-      }),
+      this.prisma.player.findUnique({ where: { id: playerId } }),
       this.getRestrictedPositionsForTeam(teamId),
     ]);
 
@@ -890,22 +826,19 @@ export class DraftStateManager {
     if (!player) {
       throw new Error('Player not found');
     }
-    const playerPos = this.normalizePos(player.position);
-    if (restrictedPositions.includes(playerPos)) {
+    if (restrictedPositions.includes(normalizePosition(player.position))) {
       throw new Error(`Positional limit reached for ${player.position}`);
     }
 
-    // Stop the timer
     this.stopTimer();
 
     const now = new Date();
 
     // --- Phase 2: Transaction (write phase) ---
     // Calculate next pick BEFORE the transaction (read-only query, safe to do outside)
-    const nextPickResult = await this.calculateNextPick(state.currentPick, settings?.draftType || 'SNAKE');
+    const nextPickResult = await this.calculateNextPick(state.currentPick);
 
     await this.prisma.$transaction(async (tx) => {
-      // Update the pick
       await tx.draftPick.update({
         where: { id: currentPick.id },
         data: {
@@ -935,7 +868,6 @@ export class DraftStateManager {
         },
       });
 
-      // Update draft state based on pre-computed next pick
       if (nextPickResult) {
         await tx.draftState.update({
           where: { leagueId: this.leagueId },
@@ -946,7 +878,7 @@ export class DraftStateManager {
             lastPickId: currentPick.id,
             undoAvailable: true,
             timerStartedAt: now,
-            timerSecondsRemaining: settings?.timerDurationSeconds || 90,
+            timerSecondsRemaining: timerDurationOf(settings),
             lastActivityAt: now,
           },
         });
@@ -967,35 +899,18 @@ export class DraftStateManager {
     this.stateCache = null;
 
     // --- Phase 3: Build payload and emit ASAP ---
-    // Fetch next team info and updated roster in parallel
-    let nextTeam: TeamSummary | undefined;
-
-    const parallelFetches: Promise<any>[] = [
+    const [updatedRoster, nextTeamRecord] = await Promise.all([
       this.getTeamRoster(teamId),
-    ];
+      nextPickResult
+        ? this.prisma.team.findUnique({
+            where: { id: nextPickResult.teamId },
+            include: { owner: { select: { name: true } } },
+          })
+        : Promise.resolve(null),
+    ]);
 
-    if (nextPickResult) {
-      parallelFetches.push(
-        this.prisma.team.findUnique({
-          where: { id: nextPickResult.teamId },
-          include: { owner: { select: { name: true } } },
-        })
-      );
-    }
+    const nextTeam = nextTeamRecord ? toTeamSummary(nextTeamRecord) : undefined;
 
-    const [updatedRoster, nextTeamRecord] = await Promise.all(parallelFetches);
-
-    if (nextTeamRecord) {
-      nextTeam = {
-        id: nextTeamRecord.id,
-        name: nextTeamRecord.name,
-        ownerId: nextTeamRecord.ownerId,
-        ownerName: nextTeamRecord.owner?.name || 'Open Slot',
-        draftPosition: nextTeamRecord.draftPosition || 0,
-      };
-    }
-
-    // Broadcast pick made
     const payload: PickMadePayload = {
       leagueId: this.leagueId,
       pick: {
@@ -1009,52 +924,36 @@ export class DraftStateManager {
         originalOwnerId: currentPick.originalOwnerId,
         isComplete: true,
         isKeeper: false,
-        selectedPlayer: {
-          id: player.id,
-          sleeperId: player.sleeperId,
-          fullName: player.fullName,
-          position: player.position,
-          nflTeam: player.nflTeam,
-          rank: player.rank,
-          adp: player.adp,
-          bye: player.byeWeek,
-        },
+        selectedPlayer: toPlayerSummary(player),
         selectedAt: now.toISOString(),
       },
-      player: {
-        id: player.id,
-        sleeperId: player.sleeperId,
-        fullName: player.fullName,
-        position: player.position,
-        nflTeam: player.nflTeam,
-        rank: player.rank,
-      },
+      player: toPlayerSummary(player),
       teamId,
       teamName: currentPick.currentOwner.name,
       pickNumber: state.currentPick,
       round: currentPick.round,
-      nextPick: nextPickResult && nextTeam
-        ? {
-          pickNumber: nextPickResult.overall,
-          round: nextPickResult.round,
-          teamId: nextPickResult.teamId,
-          team: nextTeam,
-        }
-        : undefined,
+      nextPick:
+        nextPickResult && nextTeam
+          ? {
+              pickNumber: nextPickResult.overall,
+              round: nextPickResult.round,
+              teamId: nextPickResult.teamId,
+              team: nextTeam,
+            }
+          : undefined,
       teamRosterUpdates: {
         [teamId]: updatedRoster,
       },
       timestamp: now.toISOString(),
     };
 
-    this.io.to(this.getRoomName()).emit(SocketEvents.PICK_MADE, payload);
-    this.io.to(this.getRoomName()).emit(SocketEvents.PLAYER_TAKEN, {
+    this.room.emit(SocketEvents.PICK_MADE, payload);
+    this.room.emit(SocketEvents.PLAYER_TAKEN, {
       leagueId: this.leagueId,
       playerId,
       teamId,
     });
 
-    // If there's a next pick, start the timer and emit on the clock
     if (nextPickResult && nextTeam) {
       const onClockPayload: OnTheClockPayload = {
         leagueId: this.leagueId,
@@ -1062,14 +961,13 @@ export class DraftStateManager {
         team: nextTeam,
         pickNumber: nextPickResult.overall,
         round: nextPickResult.round,
-        timerDuration: settings?.timerDurationSeconds || 90,
+        timerDuration: timerDurationOf(settings),
         timerStartedAt: now.toISOString(),
       };
-      this.io.to(this.getRoomName()).emit(SocketEvents.ON_THE_CLOCK, onClockPayload);
-      this.startTimer(settings?.timerDurationSeconds || 90);
+      this.room.emit(SocketEvents.ON_THE_CLOCK, onClockPayload);
+      this.startTimer(timerDurationOf(settings));
     } else {
-      // Draft complete
-      this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_COMPLETE, {
+      this.room.emit(SocketEvents.DRAFT_COMPLETE, {
         leagueId: this.leagueId,
         completedAt: now.toISOString(),
       });
@@ -1078,24 +976,16 @@ export class DraftStateManager {
     // --- Phase 4: Deferred non-critical work (don't block the response) ---
     // These run after the socket emit so the client gets a fast response
     Promise.all([
-      this.prisma.draftActivityLog.create({
-        data: {
-          leagueId: this.leagueId,
-          activityType: 'PICK_MADE',
-          description: `${currentPick.currentOwner.name} selected ${player.fullName}`,
-          teamId,
-          pickNumber: state.currentPick,
-          playerId,
-        },
-      }),
-      this.prisma.draftQueue.deleteMany({
-        where: { playerId }
-      }),
+      this.logActivity(
+        'PICK_MADE',
+        `${currentPick.currentOwner.name} selected ${player.fullName}`,
+        { teamId, pickNumber: state.currentPick, playerId }
+      ),
+      this.prisma.draftQueue.deleteMany({ where: { playerId } }),
     ]).catch((err) => {
       console.error('[makePick] Deferred work failed:', err);
     });
   }
-
 
   async forcePick(playerId: string): Promise<void> {
     const state = await this.getCurrentState();
@@ -1133,10 +1023,8 @@ export class DraftStateManager {
       where: { id: lastPick.selectedPlayerId },
     });
 
-    // Stop the timer
     this.stopTimer();
 
-    // Undo in transaction
     await this.prisma.$transaction(async (tx) => {
       // Remove drafted player from roster (only DRAFTED entries, not marketplace FREE_AGENT ones)
       await tx.playerRoster.deleteMany({
@@ -1148,7 +1036,6 @@ export class DraftStateManager {
         },
       });
 
-      // Reset the pick
       await tx.draftPick.update({
         where: { id: lastPick.id },
         data: {
@@ -1158,7 +1045,6 @@ export class DraftStateManager {
         },
       });
 
-      // Reset draft state
       await tx.draftState.update({
         where: { leagueId: this.leagueId },
         data: {
@@ -1176,23 +1062,16 @@ export class DraftStateManager {
 
     this.stateCache = null;
 
-    // Log activity
-    await this.prisma.draftActivityLog.create({
-      data: {
-        leagueId: this.leagueId,
-        activityType: 'PICK_UNDONE',
-        description: `Pick undone: ${player?.fullName || 'Unknown'}`,
-        teamId: lastPick.currentOwnerId,
-        pickNumber: lastPick.overallPickNumber,
-        playerId: lastPick.selectedPlayerId,
-      },
+    await this.logActivity('PICK_UNDONE', `Pick undone: ${player?.fullName || 'Unknown'}`, {
+      teamId: lastPick.currentOwnerId,
+      pickNumber: lastPick.overallPickNumber,
+      playerId: lastPick.selectedPlayerId,
     });
 
     // Get updated roster for the team that lost the player
     const updatedRoster = await this.getTeamRoster(lastPick.currentOwnerId);
 
-    // Broadcast
-    this.io.to(this.getRoomName()).emit(SocketEvents.PICK_UNDONE, {
+    this.room.emit(SocketEvents.PICK_UNDONE, {
       leagueId: this.leagueId,
       pickId: lastPick.id,
       pickNumber: lastPick.overallPickNumber || 0,
@@ -1209,25 +1088,20 @@ export class DraftStateManager {
     const settings = await this.prisma.draftSettings.findUnique({
       where: { leagueId: this.leagueId },
     });
+    const timerDuration = timerDurationOf(settings);
 
     const onClockPayload: OnTheClockPayload = {
       leagueId: this.leagueId,
       teamId: lastPick.currentOwnerId,
-      team: {
-        id: lastPick.currentOwner.id,
-        name: lastPick.currentOwner.name,
-        ownerId: lastPick.currentOwner.ownerId,
-        ownerName: lastPick.currentOwner.owner?.name || 'Open Slot',
-        draftPosition: lastPick.currentOwner.draftPosition || 0,
-      },
+      team: toTeamSummary(lastPick.currentOwner),
       pickNumber: lastPick.overallPickNumber || 0,
       round: lastPick.round,
-      timerDuration: settings?.timerDurationSeconds || 90,
+      timerDuration,
       timerStartedAt: new Date().toISOString(),
     };
 
-    this.io.to(this.getRoomName()).emit(SocketEvents.ON_THE_CLOCK, onClockPayload);
-    this.startTimer(settings?.timerDurationSeconds || 90);
+    this.room.emit(SocketEvents.ON_THE_CLOCK, onClockPayload);
+    this.startTimer(timerDuration);
   }
 
   // ===========================================================================
@@ -1238,21 +1112,20 @@ export class DraftStateManager {
     this.stopTimer();
 
     await this.prisma.$transaction(async (tx) => {
-      // 0. Define current year for query
-      const currentYear = new Date().getFullYear();
+      const currentSeason = new Date().getFullYear();
 
-      // 1. (Removed) Do NOT delete future pick records as they may represent traded picks.
-      // Only current season draft state should be reset.
+      // NOTE: future-season pick records are intentionally left untouched — they
+      // may represent traded picks. Only the current season is reset.
 
-      // 2. Clear selections AND reset traded picks back to original owners
-      // Use raw query since Prisma updateMany can't set column = another column
+      // Clear selections AND reset traded picks back to original owners.
+      // Raw query because Prisma updateMany can't set column = another column.
       await tx.$executeRawUnsafe(
         `UPDATE "DraftPick" SET "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false, "currentOwnerId" = "originalOwnerId" WHERE "leagueId" = $1 AND "season" = $2`,
         this.leagueId,
-        currentYear
+        currentSeason
       );
 
-      // 3. Delete all player rosters (except keepers and marketplace FREE_AGENT entries)
+      // Delete all player rosters (except keepers and marketplace FREE_AGENT entries)
       await tx.playerRoster.deleteMany({
         where: {
           leagueId: this.leagueId,
@@ -1261,7 +1134,6 @@ export class DraftStateManager {
         },
       });
 
-      // 4. Reset draft state
       await tx.draftState.update({
         where: { leagueId: this.leagueId },
         data: {
@@ -1281,7 +1153,6 @@ export class DraftStateManager {
         },
       });
 
-      // 5. Cancel all pending trades
       await tx.trade.updateMany({
         where: {
           leagueId: this.leagueId,
@@ -1297,18 +1168,10 @@ export class DraftStateManager {
 
     this.stateCache = null;
 
-    // Log activity
-    await this.prisma.draftActivityLog.create({
-      data: {
-        leagueId: this.leagueId,
-        activityType: 'SETTINGS_CHANGED',
-        description: 'Draft fully reset by commissioner',
-      },
-    });
+    await this.logActivity('SETTINGS_CHANGED', 'Draft fully reset by commissioner');
 
-    // Broadcast the full reset state
     const fullState = await this.getFullState();
-    this.io.to(this.getRoomName()).emit(SocketEvents.DRAFT_RESET, fullState);
+    this.room.emit(SocketEvents.DRAFT_RESET, fullState);
   }
 
   async setDraftOrder(teamOrder: string[], updatedBy: string): Promise<void> {
@@ -1318,12 +1181,11 @@ export class DraftStateManager {
       throw new Error('Cannot change order while draft is in progress. Pause the draft first.');
     }
 
-    // Update team positions in transaction
     await this.prisma.$transaction(async (tx) => {
-      for (let i = 0; i < teamOrder.length; i++) {
+      for (const [index, teamId] of teamOrder.entries()) {
         await tx.team.update({
-          where: { id: teamOrder[i] },
-          data: { draftPosition: i + 1 },
+          where: { id: teamId },
+          data: { draftPosition: index + 1 },
         });
       }
 
@@ -1333,21 +1195,13 @@ export class DraftStateManager {
       }
     });
 
-    // Log activity
-    await this.prisma.draftActivityLog.create({
-      data: {
-        leagueId: this.leagueId,
-        activityType: 'ORDER_UPDATED',
-        description: 'Draft order updated by commissioner',
-        triggeredById: updatedBy,
-        metadata: { newOrder: teamOrder },
-      },
+    await this.logActivity('ORDER_UPDATED', 'Draft order updated by commissioner', {
+      triggeredById: updatedBy,
+      metadata: { newOrder: teamOrder },
     });
 
-    // Get updated teams
     const teams = await this.getTeamsWithOrder();
 
-    // Broadcast
     const payload: OrderUpdatedPayload = {
       leagueId: this.leagueId,
       newOrder: teams,
@@ -1356,45 +1210,42 @@ export class DraftStateManager {
       timestamp: new Date().toISOString(),
     };
 
-    this.io.to(this.getRoomName()).emit(SocketEvents.ORDER_UPDATED, payload);
+    this.room.emit(SocketEvents.ORDER_UPDATED, payload);
   }
 
-  private async recalculateDraftPicks(tx: any, teamOrder: string[]): Promise<void> {
+  private async recalculateDraftPicks(
+    tx: Prisma.TransactionClient,
+    teamOrder: string[]
+  ): Promise<void> {
     const settings = await this.prisma.draftSettings.findUnique({
       where: { leagueId: this.leagueId },
     });
 
     if (!settings) return;
 
-    const totalTeams = teamOrder.length;
-    const totalRounds = settings.totalRounds;
-
-    // Delete existing picks
     await tx.draftPick.deleteMany({
       where: { leagueId: this.leagueId },
     });
 
-    // Create new picks based on draft type
-    const picks: any[] = [];
-    let overallPick = 1;
+    const season = new Date().getFullYear();
+    const picks: Prisma.DraftPickCreateManyInput[] = [];
+    let overallPickNumber = 1;
 
-    for (let round = 1; round <= totalRounds; round++) {
-      const isReversed = settings.draftType === 'SNAKE' && round % 2 === 0;
-      const orderForRound = isReversed ? [...teamOrder].reverse() : teamOrder;
+    for (let round = 1; round <= settings.totalRounds; round++) {
+      const isReversedRound = settings.draftType === 'SNAKE' && round % 2 === 0;
+      const orderForRound = isReversedRound ? [...teamOrder].reverse() : teamOrder;
 
-      for (let pickInRound = 1; pickInRound <= totalTeams; pickInRound++) {
-        const teamId = orderForRound[pickInRound - 1];
+      orderForRound.forEach((teamId, index) => {
         picks.push({
           leagueId: this.leagueId,
-          season: new Date().getFullYear(),
+          season,
           round,
-          pickInRound,
-          overallPickNumber: overallPick,
+          pickInRound: index + 1,
+          overallPickNumber: overallPickNumber++,
           originalOwnerId: teamId,
           currentOwnerId: teamId,
         });
-        overallPick++;
-      }
+      });
     }
 
     await tx.draftPick.createMany({ data: picks });
@@ -1413,7 +1264,7 @@ export class DraftStateManager {
       remaining--;
 
       // Broadcast tick — no async DB call needed, just use local state
-      this.io.to(this.getRoomName()).emit(SocketEvents.TIMER_TICK, {
+      this.room.emit(SocketEvents.TIMER_TICK, {
         leagueId: this.leagueId,
         secondsRemaining: remaining,
         currentPick: 0, // Client already knows the current pick from state
@@ -1422,12 +1273,14 @@ export class DraftStateManager {
 
       // Update DB periodically (fire-and-forget)
       if (remaining % 10 === 0 && remaining > 0) {
-        this.prisma.draftState.update({
-          where: { leagueId: this.leagueId },
-          data: { timerSecondsRemaining: remaining },
-        }).catch((err) => {
-          console.error('[Timer] Failed to persist timer state:', err);
-        });
+        this.prisma.draftState
+          .update({
+            where: { leagueId: this.leagueId },
+            data: { timerSecondsRemaining: remaining },
+          })
+          .catch((err) => {
+            console.error('[Timer] Failed to persist timer state:', err);
+          });
       }
 
       if (remaining <= 0) {
@@ -1451,100 +1304,107 @@ export class DraftStateManager {
     const state = await this.getCurrentState();
 
     if (!state.currentTeamId) return;
+    const teamId = state.currentTeamId;
 
-    // Log activity
-    await this.prisma.draftActivityLog.create({
-      data: {
-        leagueId: this.leagueId,
-        activityType: 'TIMER_EXPIRED',
-        description: 'Pick timer expired',
-        teamId: state.currentTeamId,
-        pickNumber: state.currentPick,
-      },
-    });
-
-    // Broadcast timer expired
-    this.io.to(this.getRoomName()).emit(SocketEvents.TIMER_EXPIRED, {
-      leagueId: this.leagueId,
-      teamId: state.currentTeamId,
+    await this.logActivity('TIMER_EXPIRED', 'Pick timer expired', {
+      teamId,
       pickNumber: state.currentPick,
     });
 
-    // Auto-pick logic:
-    const restrictedPositions = await this.getRestrictedPositionsForTeam(state.currentTeamId);
+    this.room.emit(SocketEvents.TIMER_EXPIRED, {
+      leagueId: this.leagueId,
+      teamId,
+      pickNumber: state.currentPick,
+    });
 
-    // 1. Check if team has anything in queue that is available AND satisfies positional requirements
+    const restrictedPositions = await this.getRestrictedPositionsForTeam(teamId);
+    const isPickable = (position: string) =>
+      !restrictedPositions.includes(normalizePosition(position));
+
+    // 1. Auto-pick the highest-ranked queued player that is available AND
+    //    satisfies positional requirements
     const teamQueue = await this.prisma.draftQueue.findMany({
-      where: { teamId: state.currentTeamId },
+      where: { teamId },
       orderBy: { rank: 'asc' },
-      include: { player: true }
+      include: { player: true },
     });
 
     for (const queueItem of teamQueue) {
-      const isAvailable = await this.isPlayerAvailable(queueItem.playerId);
-      const playerPos = this.normalizePos(queueItem.player.position);
-      const isRestricted = restrictedPositions.includes(playerPos);
-
-      if (isAvailable && !isRestricted) {
-        console.log(`[TimerExpired] Drafting top valid queued player ${queueItem.playerId} for team ${state.currentTeamId}`);
-        await this.makePick(state.currentTeamId, queueItem.playerId);
+      if (isPickable(queueItem.player.position) && (await this.isPlayerAvailable(queueItem.playerId))) {
+        console.log(
+          `[TimerExpired] Drafting top valid queued player ${queueItem.playerId} for team ${teamId}`
+        );
+        await this.makePick(teamId, queueItem.playerId);
         return;
       }
     }
 
     // 2. Fallback to best available player that satisfies positional requirements
     const availablePlayers = await this.getAvailablePlayers();
-    const validPlayer = availablePlayers.find(p => {
-      const pPos = this.normalizePos(p.position);
-      return !restrictedPositions.includes(pPos);
-    });
+    const validPlayer = availablePlayers.find((p) => isPickable(p.position));
 
     if (validPlayer) {
-      console.log(`[TimerExpired] No queue found. Drafting best valid player ${validPlayer.fullName} for team ${state.currentTeamId}`);
-      await this.makePick(state.currentTeamId, validPlayer.id);
-    } else {
-      // Last resort: if no valid player is found (should be rare), just take the best available
-      // to avoid stalling the draft, but this shouldn't happen with correct settings
-      const bestPlayer = availablePlayers[0];
-      if (bestPlayer) {
-        console.log(`[TimerExpired] No valid position player found. Drafting best available player ${bestPlayer.fullName} for team ${state.currentTeamId}`);
-        await this.makePick(state.currentTeamId, bestPlayer.id);
-      }
+      console.log(
+        `[TimerExpired] No queue found. Drafting best valid player ${validPlayer.fullName} for team ${teamId}`
+      );
+      await this.makePick(teamId, validPlayer.id);
+      return;
     }
-  }
 
-  private normalizePos(pos: string): string {
-    return pos === 'DST' ? 'DEF' : pos;
+    // Last resort: if no valid player is found (should be rare), just take the best
+    // available to avoid stalling the draft. Shouldn't happen with correct settings.
+    const bestPlayer = availablePlayers[0];
+    if (bestPlayer) {
+      console.log(
+        `[TimerExpired] No valid position player found. Drafting best available player ${bestPlayer.fullName} for team ${teamId}`
+      );
+      await this.makePick(teamId, bestPlayer.id);
+    }
   }
 
   // ===========================================================================
   // HELPERS
   // ===========================================================================
 
-  private async isPlayerAvailable(playerId: string): Promise<boolean> {
-    // Check if already drafted
-    const drafted = await this.prisma.draftPick.findFirst({
-      where: {
+  private async logActivity(
+    activityType: Prisma.DraftActivityLogCreateInput['activityType'],
+    description: string,
+    extra: Partial<Prisma.DraftActivityLogUncheckedCreateInput> = {}
+  ): Promise<void> {
+    await this.prisma.draftActivityLog.create({
+      data: {
         leagueId: this.leagueId,
-        selectedPlayerId: playerId,
-        isComplete: true,
+        activityType,
+        description,
+        ...extra,
       },
     });
-
-    if (drafted) return false;
-
-    // Check if already on any roster (keeper or drafted) — exclude marketplace FREE_AGENT entries
-    const rostered = await this.prisma.playerRoster.findFirst({
-      where: {
-        leagueId: this.leagueId,
-        playerId,
-        acquiredVia: { not: 'FREE_AGENT' },
-      },
-    });
-
-    return !rostered;
   }
 
+  private async isPlayerAvailable(playerId: string): Promise<boolean> {
+    const [draftedPick, rosterEntry] = await Promise.all([
+      this.prisma.draftPick.findFirst({
+        where: {
+          leagueId: this.leagueId,
+          selectedPlayerId: playerId,
+          isComplete: true,
+        },
+      }),
+      // Rostered = keeper or drafted; marketplace FREE_AGENT entries don't count
+      this.prisma.playerRoster.findFirst({
+        where: {
+          leagueId: this.leagueId,
+          playerId,
+          acquiredVia: { not: 'FREE_AGENT' },
+        },
+      }),
+    ]);
+
+    return !draftedPick && !rosterEntry;
+  }
+
+  // Determines which positions a team may NOT draft, so remaining picks are
+  // guaranteed to cover every unfilled starting slot.
   private async getRestrictedPositionsForTeam(teamId: string): Promise<string[]> {
     const settings = await this.prisma.draftSettings.findUnique({
       where: { leagueId: this.leagueId },
@@ -1557,7 +1417,7 @@ export class DraftStateManager {
       this.prisma.playerRoster.findMany({
         where: {
           leagueId: this.leagueId,
-          teamId: teamId,
+          teamId,
           acquiredVia: { not: 'FREE_AGENT' },
         },
         include: { player: { select: { position: true } } },
@@ -1571,132 +1431,90 @@ export class DraftStateManager {
       }),
     ]);
 
-    const counts: Record<string, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
-    roster.forEach((r) => {
-      const targetPos = this.normalizePos(r.player.position);
-      if (counts[targetPos] !== undefined) {
-        counts[targetPos]++;
+    const rosterCounts: Record<CorePosition, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
+    for (const entry of roster) {
+      const position = normalizePosition(entry.player.position);
+      if (isCorePosition(position)) {
+        rosterCounts[position]++;
       }
-    });
+    }
 
-    let remQB = settings.qbCount || 0;
-    let remRB = settings.rbCount || 0;
-    let remWR = settings.wrCount || 0;
-    let remTE = settings.teCount || 0;
-    let remK = settings.kCount || 0;
-    let remDEF = settings.defCount || 0;
-    let remFLEX = settings.flexCount || 0;
-    let remSFLEX = settings.superflexCount || 0;
+    const slotCounts: Record<CorePosition, number> = {
+      QB: settings.qbCount,
+      RB: settings.rbCount,
+      WR: settings.wrCount,
+      TE: settings.teCount,
+      K: settings.kCount,
+      DEF: settings.defCount,
+    };
 
-    // 1. Primary slots
-    let leftQB = Math.max(0, (counts.QB || 0) - remQB);
-    remQB = Math.max(0, remQB - (counts.QB || 0));
+    // Split each position into unfilled dedicated slots vs. overflow players
+    const unfilled = {} as Record<CorePosition, number>;
+    const overflow = {} as Record<CorePosition, number>;
+    for (const position of CORE_POSITIONS) {
+      unfilled[position] = Math.max(0, slotCounts[position] - rosterCounts[position]);
+      overflow[position] = Math.max(0, rosterCounts[position] - slotCounts[position]);
+    }
 
-    let leftRB = Math.max(0, (counts.RB || 0) - remRB);
-    remRB = Math.max(0, remRB - (counts.RB || 0));
+    // Overflow players fill fungible slots (FLEX first, then SUPERFLEX);
+    // returns the number of fungible slots still unfilled.
+    const fillFungibleSlots = (slotCount: number, eligible: readonly CorePosition[]): number => {
+      let unfilledSlots = slotCount;
+      for (const position of eligible) {
+        const used = Math.min(unfilledSlots, overflow[position]);
+        overflow[position] -= used;
+        unfilledSlots -= used;
+      }
+      return unfilledSlots;
+    };
 
-    let leftWR = Math.max(0, (counts.WR || 0) - remWR);
-    remWR = Math.max(0, remWR - (counts.WR || 0));
+    const unfilledFlex = fillFungibleSlots(settings.flexCount, FLEX_ELIGIBLE);
+    const unfilledSuperflex = fillFungibleSlots(settings.superflexCount, SUPERFLEX_ELIGIBLE);
 
-    let leftTE = Math.max(0, (counts.TE || 0) - remTE);
-    remTE = Math.max(0, remTE - (counts.TE || 0));
-
-    let leftK = Math.max(0, (counts.K || 0) - remK);
-    remK = Math.max(0, remK - (counts.K || 0));
-
-    let leftDEF = Math.max(0, (counts.DEF || 0) - remDEF);
-    remDEF = Math.max(0, remDEF - (counts.DEF || 0));
-
-    // 2. FLEX (RB/WR/TE)
-    const fillingFLEX = Math.min(remFLEX, leftRB + leftWR + leftTE);
-    let fNeed = fillingFLEX;
-    let uRB = Math.min(fNeed, leftRB);
-    leftRB -= uRB;
-    fNeed -= uRB;
-    let uWR = Math.min(fNeed, leftWR);
-    leftWR -= uWR;
-    fNeed -= uWR;
-    let uTE = Math.min(fNeed, leftTE);
-    leftTE -= uTE;
-    remFLEX -= fillingFLEX;
-
-    // 3. SFLEX (QB/RB/WR/TE)
-    const fillingSFLEX = Math.min(remSFLEX, leftQB + leftRB + leftWR + leftTE);
-    let sfNeed = fillingSFLEX;
-    let sQB = Math.min(sfNeed, leftQB);
-    leftQB -= sQB;
-    sfNeed -= sQB;
-    let sRB = Math.min(sfNeed, leftRB);
-    leftRB -= sRB;
-    sfNeed -= sRB;
-    let sWR = Math.min(sfNeed, leftWR);
-    leftWR -= sWR;
-    sfNeed -= sWR;
-    let sTE = Math.min(sfNeed, leftTE);
-    leftTE -= sTE;
-    remSFLEX -= fillingSFLEX;
-
-    const totalEmptyStarters = remQB + remRB + remWR + remTE + remK + remDEF + remFLEX + remSFLEX;
-    const currentBenchCount = leftQB + leftRB + leftWR + leftTE + leftK + leftDEF;
-    const benchLimit = settings.benchCount || 0;
+    const dedicatedUnfilled = CORE_POSITIONS.reduce((sum, pos) => sum + unfilled[pos], 0);
+    const totalUnfilledStarters = dedicatedUnfilled + unfilledFlex + unfilledSuperflex;
+    const benchUsed = CORE_POSITIONS.reduce((sum, pos) => sum + overflow[pos], 0);
 
     // If all starters are filled, no restrictions needed
-    if (totalEmptyStarters === 0) return [];
+    if (totalUnfilledStarters === 0) return [];
 
-    // "Exclusive" starters = slots that can ONLY be filled by their specific position
-    // K slot → only K, DEF slot → only DEF, QB slot → only QB, etc.
-    // "Fungible" starters = FLEX (RB/WR/TE) and SFLEX (QB/RB/WR/TE) accept multiple positions
-    const exclusiveUnfilled = remQB + remRB + remWR + remTE + remK + remDEF;
+    // A position is restricted when its dedicated slots are full and — when
+    // fungible slots are considered — no FLEX/SUPERFLEX slot can absorb it.
+    const restrictedPositions = (considerFungibleSlots: boolean): string[] =>
+      CORE_POSITIONS.filter((position) => {
+        if (unfilled[position] > 0) return false;
+        if (!considerFungibleSlots) return true;
+        if (unfilledSuperflex > 0 && SUPERFLEX_ELIGIBLE.includes(position)) return false;
+        if (unfilledFlex > 0 && FLEX_ELIGIBLE.includes(position)) return false;
+        return true;
+      });
 
-    // TIER 1: Remaining picks ≤ exclusive unfilled starters
-    //   → Every pick MUST go toward an exclusive slot. No "wasting" a pick on a fungible slot.
+    // TIER 1: Remaining picks ≤ unfilled dedicated starters
+    //   → Every pick MUST go toward a dedicated slot. No "wasting" a pick on a fungible slot.
     //   Example: 3 picks left, need RB(1)+K(1)+DEF(1)+FLEX(1) = 4 starters.
-    //   Exclusive = 3 (RB+K+DEF). All 3 picks must fill exclusive slots → WR restricted.
-    if (remainingPicks <= exclusiveUnfilled) {
-      const restricted = [];
-      if (remQB === 0) restricted.push('QB');
-      if (remRB === 0) restricted.push('RB');
-      if (remWR === 0) restricted.push('WR');
-      if (remTE === 0) restricted.push('TE');
-      if (remK === 0) restricted.push('K');
-      if (remDEF === 0) restricted.push('DEF');
-      return restricted;
+    //   Dedicated = 3 (RB+K+DEF). All 3 picks must fill dedicated slots → WR restricted.
+    if (remainingPicks <= dedicatedUnfilled) {
+      return restrictedPositions(false);
     }
 
-    // TIER 2: Remaining picks ≤ total empty starters (but > exclusive)
-    //   → Enough picks for exclusive slots but not all starters. Allow fungible positions too.
-    if (remainingPicks <= totalEmptyStarters) {
-      const restricted = [];
-      if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
-      if (remRB === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('RB');
-      if (remWR === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('WR');
-      if (remTE === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('TE');
-      if (remK === 0) restricted.push('K');
-      if (remDEF === 0) restricted.push('DEF');
-      return restricted;
+    // TIER 2: Remaining picks ≤ total unfilled starters (but > dedicated)
+    //   → Enough picks for dedicated slots but not all starters. Allow fungible positions too.
+    if (remainingPicks <= totalUnfilledStarters) {
+      return restrictedPositions(true);
     }
 
-    // TIER 3: Plenty of picks remaining — only restrict when bench is full
-    if (currentBenchCount < benchLimit) return [];
+    // TIER 3: Plenty of picks remaining — only restrict once the bench is full
+    if (benchUsed < settings.benchCount) return [];
 
-    const restricted = [];
-    if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
-    if (remRB === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('RB');
-    if (remWR === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('WR');
-    if (remTE === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('TE');
-    if (remK === 0) restricted.push('K');
-    if (remDEF === 0) restricted.push('DEF');
-
-    return restricted;
+    return restrictedPositions(true);
   }
 
+  // Finds the next uncompleted pick with a higher overall number. Uses the
+  // actual DraftPick rows as the source of truth, which is more resilient than
+  // computing total picks from settings.
   private async calculateNextPick(
-    currentOverall: number,
-    draftType: DraftType
+    currentOverall: number
   ): Promise<{ round: number; overall: number; teamId: string } | null> {
-    // Find the next uncompleted pick in the database with a higher overall number.
-    // This is more resilient than computing totalPicks from settings, because it
-    // uses the actual DraftPick rows as the source of truth.
     const nextPick = await this.prisma.draftPick.findFirst({
       where: {
         leagueId: this.leagueId,
