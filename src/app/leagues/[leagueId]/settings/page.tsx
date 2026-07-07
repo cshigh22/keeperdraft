@@ -2,6 +2,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { notFound, redirect } from "next/navigation";
 import LeagueSettingsForm from "./LeagueSettingsForm";
+import DeleteLeagueCard from "./DeleteLeagueCard";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
@@ -64,6 +65,10 @@ export default async function LeagueSettingsPage({
                 </div>
 
                 <LeagueSettingsForm league={league} />
+
+                <div className="mt-8">
+                    <DeleteLeagueCard leagueId={league.id} leagueName={league.name} />
+                </div>
             </div>
         </div>
     );

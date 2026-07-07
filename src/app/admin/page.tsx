@@ -162,6 +162,10 @@ function CommissionerDashboardContent() {
     leagueId,
     userId: authSession?.user?.id || '',
     teamId: userTeam?.id,
+    // Fires on the server-confirmed DRAFT_START broadcast, not the optimistic flip
+    onDraftStart: () => {
+      window.location.href = `/draft?leagueId=${leagueId}`;
+    },
   });
 
   const handleRankingUpdate = async () => {

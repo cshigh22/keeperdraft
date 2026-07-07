@@ -3,6 +3,7 @@
 import { randomBytes } from 'crypto';
 import { prisma } from '@/lib/prisma';
 import { redirect } from 'next/navigation';
+import { revalidatePath } from 'next/cache';
 import { auth } from '@/auth';
 import { CommissionerService } from '@/services/commissioner.service';
 import type { DraftType } from '@prisma/client';
@@ -98,6 +99,8 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
 
     const totalRounds = calculateTotalRounds(rosterCounts, maxKeepers);
 
+    let leagueId: string | undefined;
+
     try {
         const session = await auth();
         if (!session?.user?.id) {
@@ -117,7 +120,7 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
             };
         }
 
-        const leagueId = await prisma.$transaction(async (tx) => {
+        leagueId = await prisma.$transaction(async (tx) => {
             // 1. Create League with settings and initial draft state
             const league = await tx.league.create({
                 data: {
@@ -189,7 +192,7 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
         return { message: `Failed to create league: ${errorMessage}. Please try again.` };
     }
 
-    redirect('/leagues');
+    redirect(`/leagues/${leagueId}`);
 }
 
 // ============================================================================
@@ -348,5 +351,40 @@ export async function updateLeague(
     } catch (error) {
         console.error('Update league failed:', error);
         return { message: 'Failed to update league' };
+    }
+}
+
+// ============================================================================
+// DELETE LEAGUE
+// ============================================================================
+
+export async function deleteLeague(leagueId: string): Promise<UpdateLeagueState> {
+    const session = await auth();
+    if (!session?.user?.id) {
+        return { message: 'Unauthorized' };
+    }
+
+    try {
+        const league = await prisma.league.findUnique({
+            where: { id: leagueId },
+            select: { commissionerId: true },
+        });
+
+        if (!league || league.commissionerId !== session.user.id) {
+            return { message: 'Only the commissioner can delete this league' };
+        }
+
+        // DraftActivityLog references the league by plain string (no FK), so it
+        // must be cleaned up explicitly; every other relation cascades in the DB.
+        await prisma.$transaction([
+            prisma.draftActivityLog.deleteMany({ where: { leagueId } }),
+            prisma.league.delete({ where: { id: leagueId } }),
+        ]);
+
+        revalidatePath('/leagues');
+        return { success: true };
+    } catch (error) {
+        console.error('Delete league failed:', error);
+        return { message: 'Failed to delete league' };
     }
 }

@@ -37,6 +37,11 @@ export default async function LeaguesPage() {
                 select: {
                     role: true
                 }
+            },
+            draftState: {
+                select: {
+                    status: true
+                }
             }
         }
     });
@@ -70,7 +75,9 @@ export default async function LeaguesPage() {
                 </Card>
             ) : (
                 <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-                    {leagues.map((league) => (
+                    {leagues.map((league) => {
+                        const draftStatus = league.draftState?.status;
+                        return (
                         <Link key={league.id} href={`/leagues/${league.id}`} className="block h-full">
                             <Card className="h-full hover:shadow-md transition-shadow cursor-pointer">
                                 <CardHeader>
@@ -80,7 +87,20 @@ export default async function LeaguesPage() {
                                             {league.members[0]?.role}
                                         </span>
                                     </div>
-                                    <CardDescription>{league.season} Season</CardDescription>
+                                    <CardDescription className="flex items-center justify-between">
+                                        <span>{league.season} Season</span>
+                                        {(draftStatus === 'IN_PROGRESS' || draftStatus === 'PAUSED') && (
+                                            <span className="inline-flex items-center gap-1.5 text-xs font-medium bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                                                Draft Live
+                                            </span>
+                                        )}
+                                        {draftStatus === 'COMPLETED' && (
+                                            <span className="text-xs font-medium bg-muted text-muted-foreground px-2 py-0.5 rounded-full">
+                                                Draft Complete
+                                            </span>
+                                        )}
+                                    </CardDescription>
                                 </CardHeader>
                                 <CardContent>
                                     <div className="text-sm text-muted-foreground">
@@ -93,7 +113,8 @@ export default async function LeaguesPage() {
                                 </CardContent>
                             </Card>
                         </Link>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
         </div>
