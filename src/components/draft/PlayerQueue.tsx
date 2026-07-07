@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Search, Star, ChevronUp, ChevronDown, Check } from 'lucide-react';
+import { formatRank, UNRANKED_RANK } from '@/lib/rank';
 import type { PlayerSummary } from '@/types/socket';
 
 // ============================================================================
@@ -117,7 +118,7 @@ function PlayerRow({ player, isSelected, onSelect, onDraft, canDraft }: PlayerRo
       {/* Rank */}
       <div className="w-10 text-center">
         <span className="text-sm font-mono text-muted-foreground">
-          {player.rank || '-'}
+          {formatRank(player.rank)}
         </span>
       </div>
 
@@ -425,7 +426,7 @@ export function PlayerQueue({
                 <p className="font-bold text-lg">{selectedPlayer.fullName}</p>
                 <p className="text-sm text-muted-foreground">
                   {selectedPlayer.nflTeam || 'Free Agent'}
-                  {selectedPlayer.rank && ` • Rank #${selectedPlayer.rank}`}
+                  {selectedPlayer.rank && selectedPlayer.rank < UNRANKED_RANK && ` • Rank #${selectedPlayer.rank}`}
                 </p>
               </div>
             </div>

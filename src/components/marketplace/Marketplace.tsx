@@ -2,6 +2,7 @@
 
 import React, { useState, useTransition, useEffect, useMemo } from 'react';
 import { cn } from '@/lib/utils';
+import { formatRank, UNRANKED_RANK } from '@/lib/rank';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -238,7 +239,7 @@ export function Marketplace({
     }
 
     for (const group of Object.values(grouped)) {
-      group.players.sort((a, b) => (a.rank || 999) - (b.rank || 999));
+      group.players.sort((a, b) => (a.rank || UNRANKED_RANK) - (b.rank || UNRANKED_RANK));
     }
 
     return grouped;
@@ -396,7 +397,7 @@ export function Marketplace({
                                   </Badge>
                                 )}
                               </div>
-                              <span className="text-[10px] text-muted-foreground">{p.nflTeam || 'FA'} · Rank #{p.rank ?? '—'}</span>
+                              <span className="text-[10px] text-muted-foreground">{p.nflTeam || 'FA'} · Rank #{formatRank(p.rank)}</span>
                             </div>
                             <div className="flex items-center gap-1">
                               {isCommissioner && (
@@ -484,7 +485,7 @@ export function Marketplace({
                           <PositionBadge position={p.position} />
                           <div>
                             <div className="text-xs font-semibold">{p.fullName}</div>
-                            <div className="text-[10px] text-muted-foreground">{p.nflTeam || 'FA'} · Rank #{p.rank ?? '—'}</div>
+                            <div className="text-[10px] text-muted-foreground">{p.nflTeam || 'FA'} · Rank #{formatRank(p.rank)}</div>
                           </div>
                         </div>
                         <Button

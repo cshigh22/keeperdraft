@@ -13,6 +13,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { normalizePosition } from '@/lib/roster-restrictions';
+import { formatRank } from '@/lib/rank';
 
 // ============================================================================
 // Types
@@ -286,7 +287,7 @@ export function KeeperSelectionUI({
 
                                         {/* Rank */}
                                         <div className="text-center text-xs font-mono text-slate-500">
-                                            {player.rank || '-'}
+                                            {formatRank(player.rank)}
                                         </div>
 
                                         {/* ADP */}

@@ -23,6 +23,7 @@ import type {
     RosterSettings,
 } from '@/types/socket';
 import { getRestrictedPositions, normalizePosition } from '@/lib/roster-restrictions';
+import { formatRank } from '@/lib/rank';
 import { positionBadgeColors } from './position-styles';
 import {
     Tooltip,
@@ -420,7 +421,7 @@ const PlayerRow = React.memo(function PlayerRow({
             {/* Rank */}
             <div className="flex flex-col items-center justify-center ml-4">
                 <div className="text-center text-xs font-mono text-slate-500">
-                    {player.rank || '-'}
+                    {formatRank(player.rank)}
                 </div>
             </div>
 

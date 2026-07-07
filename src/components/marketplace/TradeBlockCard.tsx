@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { cn } from '@/lib/utils';
+import { formatRank } from '@/lib/rank';
 import { Badge } from '@/components/ui/badge';
 import { calculateROI } from '@/types/marketplace';
 import type { TradeBlockPlayerData } from '@/types/marketplace';
@@ -81,7 +82,7 @@ export function TradeBlockCard({
               <h3 className="text-sm font-bold truncate">{player.fullName}</h3>
             </div>
             <p className="text-[10px] text-muted-foreground mt-0.5 pl-0.5">
-              {player.nflTeam || 'Free Agent'} · Rank #{player.rank ?? '—'}
+              {player.nflTeam || 'Free Agent'} · Rank #{formatRank(player.rank)}
             </p>
           </div>
         </div>

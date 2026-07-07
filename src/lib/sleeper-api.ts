@@ -2,6 +2,7 @@
 // Server-side utility to fetch and sync player data from Sleeper
 
 import { prisma } from './prisma';
+import { UNRANKED_RANK } from './rank';
 import type { Position, PlayerStatus, Prisma } from '@prisma/client';
 
 // ============================================================================
@@ -105,6 +106,14 @@ export const SleeperAPI = {
   fetchLeagueUsers(leagueId: string): Promise<SleeperUser[]> {
     return fetchFromSleeper(`/league/${leagueId}/users`);
   },
+
+  /**
+   * Fetch full-season player stats (keyed by sleeper player id; DEF keyed by
+   * team code like "SEA"). Used to rank K/DEF by last season's fantasy points.
+   */
+  fetchSeasonStats(season: number): Promise<Record<string, { pts_std?: number }>> {
+    return fetchFromSleeper(`/stats/nfl/regular/${season}`, DAY_SECONDS);
+  },
 };
 
 // ============================================================================
@@ -112,8 +121,6 @@ export const SleeperAPI = {
 // ============================================================================
 
 const SUPPORTED_POSITIONS: readonly Position[] = ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'];
-
-const UNRANKED_RANK = 9999;
 
 /**
  * Map Sleeper position to our Position enum
