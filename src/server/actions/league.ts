@@ -1,9 +1,15 @@
 'use server';
 
+import { randomBytes } from 'crypto';
 import { prisma } from '@/lib/prisma';
 import { redirect } from 'next/navigation';
 import { auth } from '@/auth';
 import { CommissionerService } from '@/services/commissioner.service';
+import type { DraftType } from '@prisma/client';
+
+// ============================================================================
+// TYPES & HELPERS
+// ============================================================================
 
 interface CreateLeagueState {
     message?: string;
@@ -16,24 +22,68 @@ interface CreateLeagueState {
     };
 }
 
+interface UpdateLeagueState {
+    success?: boolean;
+    message?: string;
+}
+
+const ROSTER_COUNT_FIELDS = [
+    'qbCount',
+    'rbCount',
+    'wrCount',
+    'teCount',
+    'flexCount',
+    'superflexCount',
+    'kCount',
+    'defCount',
+    'benchCount',
+] as const;
+
+type RosterCounts = Record<(typeof ROSTER_COUNT_FIELDS)[number], number>;
+
+function parseIntField(formData: FormData, field: string, fallback: number = 0): number {
+    return parseInt(formData.get(field) as string) || fallback;
+}
+
+function parseRosterCounts(formData: FormData): RosterCounts {
+    return Object.fromEntries(
+        ROSTER_COUNT_FIELDS.map((field) => [field, parseIntField(formData, field)])
+    ) as RosterCounts;
+}
+
+// Total rounds = roster spots minus keeper slots (keepers are excluded from the draft board)
+function calculateTotalRounds(rosterCounts: RosterCounts, maxKeepers: number): number {
+    const totalRosterSize = Object.values(rosterCounts).reduce((sum, count) => sum + count, 0);
+    return Math.max(1, totalRosterSize - maxKeepers);
+}
+
+// Regenerates draft picks for the current team order. Must run OUTSIDE any
+// transaction: CommissionerService.setDraftOrder uses the global prisma client
+// and needs to see committed league/team/settings rows.
+async function regeneratePicksInDraftOrder(leagueId: string): Promise<void> {
+    const teams = await prisma.team.findMany({
+        where: { leagueId },
+        orderBy: { draftPosition: 'asc' },
+    });
+
+    if (teams.length > 0) {
+        await CommissionerService.setDraftOrder({
+            leagueId,
+            teamOrderList: teams.map((t) => t.id),
+        });
+    }
+}
+
+// ============================================================================
+// CREATE LEAGUE
+// ============================================================================
+
 export async function createLeague(prevState: CreateLeagueState, formData: FormData): Promise<CreateLeagueState> {
     const name = formData.get('name') as string;
-    const maxTeamsStr = formData.get('maxTeams') as string;
-    const maxTeams = parseInt(maxTeamsStr) || 12;
-    const draftType = (formData.get('draftType') as string || 'SNAKE') as 'LINEAR' | 'SNAKE';
-    const maxKeepersStr = formData.get('maxKeepers') as string;
-    const maxKeepers = parseInt(maxKeepersStr) || 0;
-
-    // Roster settings
-    const qbCount = parseInt(formData.get('qbCount') as string) || 0;
-    const rbCount = parseInt(formData.get('rbCount') as string) || 0;
-    const wrCount = parseInt(formData.get('wrCount') as string) || 0;
-    const teCount = parseInt(formData.get('teCount') as string) || 0;
-    const flexCount = parseInt(formData.get('flexCount') as string) || 0;
-    const superflexCount = parseInt(formData.get('superflexCount') as string) || 0;
-    const kCount = parseInt(formData.get('kCount') as string) || 0;
-    const defCount = parseInt(formData.get('defCount') as string) || 0;
-    const benchCount = parseInt(formData.get('benchCount') as string) || 0;
+    const maxTeams = parseIntField(formData, 'maxTeams', 12);
+    const draftType = ((formData.get('draftType') as string) || 'SNAKE') as 'LINEAR' | 'SNAKE';
+    const maxKeepers = parseIntField(formData, 'maxKeepers');
+    const rosterCounts = parseRosterCounts(formData);
 
     // Validation
     const errors: CreateLeagueState['errors'] = {};
@@ -46,9 +96,7 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
         return { errors };
     }
 
-    // Calculate total rounds: roster spots minus keeper slots (keepers are excluded from the draft board)
-    const totalRosterSize = qbCount + rbCount + wrCount + teCount + flexCount + superflexCount + kCount + defCount + benchCount;
-    const totalRounds = Math.max(1, totalRosterSize - maxKeepers);
+    const totalRounds = calculateTotalRounds(rosterCounts, maxKeepers);
 
     try {
         const session = await auth();
@@ -69,9 +117,8 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
             };
         }
 
-        // Use a longer timeout for the transaction if needed, but standard should be fine with batching
         const leagueId = await prisma.$transaction(async (tx) => {
-            // 1. Create League
+            // 1. Create League with settings and initial draft state
             const league = await tx.league.create({
                 data: {
                     name,
@@ -82,20 +129,11 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
                         create: {
                             draftType,
                             maxKeepers,
-                            qbCount,
-                            rbCount,
-                            wrCount,
-                            teCount,
-                            flexCount,
-                            superflexCount,
-                            kCount,
-                            defCount,
-                            benchCount,
+                            ...rosterCounts,
                             totalRounds,
                             timerDurationSeconds: 90,
                         },
                     },
-                    // Initialize DraftState as well
                     draftState: {
                         create: {
                             status: 'NOT_STARTED',
@@ -107,7 +145,7 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
             });
 
             // 2. Create Commissioner Team
-            const commTeam = await tx.team.create({
+            await tx.team.create({
                 data: {
                     name: 'Commissioner Team',
                     leagueId: league.id,
@@ -117,19 +155,14 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
             });
 
             // 3. Create Placeholder Teams
-            const placeholderTeamsData = [];
-            for (let i = 2; i <= maxTeams; i++) {
-                placeholderTeamsData.push({
-                    name: `Team ${i}`,
-                    leagueId: league.id,
-                    ownerId: null,
-                    draftPosition: i,
-                });
-            }
-
-            if (placeholderTeamsData.length > 0) {
+            if (maxTeams > 1) {
                 await tx.team.createMany({
-                    data: placeholderTeamsData
+                    data: Array.from({ length: maxTeams - 1 }, (_, i) => ({
+                        name: `Team ${i + 2}`,
+                        leagueId: league.id,
+                        ownerId: null,
+                        draftPosition: i + 2,
+                    })),
                 });
             }
 
@@ -147,18 +180,8 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
             timeout: 15000 // Increase timeout to 15s to be safe
         });
 
-        // 5. Generate Draft Picks
-        // We do this outside the transaction because CommissionerService.setDraftOrder 
-        // uses the global prisma instance and won't see the uncommitted league/teams.
-        const allTeams = await prisma.team.findMany({
-            where: { leagueId },
-            orderBy: { draftPosition: 'asc' },
-        });
-
-        await CommissionerService.setDraftOrder({
-            leagueId,
-            teamOrderList: allTeams.map(t => t.id),
-        });
+        // 5. Generate draft picks (outside the transaction — see helper note)
+        await regeneratePicksInDraftOrder(leagueId);
 
     } catch (error) {
         console.error('Failed to create league:', error);
@@ -168,6 +191,12 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
 
     redirect('/leagues');
 }
+
+// ============================================================================
+// INVITES & MEMBERSHIP
+// ============================================================================
+
+const INVITE_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
 export async function generateInvite(leagueId: string) {
     const session = await auth();
@@ -182,7 +211,7 @@ export async function generateInvite(leagueId: string) {
         throw new Error('Only the commissioner can generate invites');
     }
 
-    // Existing token check?
+    // Reuse an unexpired token if one exists
     const existing = await prisma.leagueInvite.findFirst({
         where: { leagueId, expiresAt: { gt: new Date() } },
         orderBy: { createdAt: 'desc' }
@@ -190,13 +219,11 @@ export async function generateInvite(leagueId: string) {
 
     if (existing) return existing.token;
 
-    const token = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-
     const invite = await prisma.leagueInvite.create({
         data: {
             leagueId,
-            token,
-            expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7), // 7 days
+            token: randomBytes(18).toString('base64url'),
+            expiresAt: new Date(Date.now() + INVITE_TTL_MS),
         }
     });
 
@@ -219,7 +246,7 @@ export async function joinLeague(token: string) {
         throw new Error('Invalid or expired invite');
     }
 
-    // Check if user is already a member
+    // Already a member? Just go to the league
     const existingMember = await prisma.leagueMember.findUnique({
         where: { userId_leagueId: { userId, leagueId: invite.leagueId } }
     });
@@ -228,7 +255,7 @@ export async function joinLeague(token: string) {
         redirect(`/leagues/${invite.leagueId}`);
     }
 
-    // Find first empty team (no owner assigned yet)
+    // Claim the first open team slot
     const emptyTeam = await prisma.team.findFirst({
         where: {
             leagueId: invite.leagueId,
@@ -260,25 +287,26 @@ export async function joinLeague(token: string) {
 
     redirect(`/leagues/${invite.leagueId}`);
 }
-export async function updateLeague(leagueId: string, prevState: any, formData: FormData) {
+
+// ============================================================================
+// UPDATE LEAGUE
+// ============================================================================
+
+export async function updateLeague(
+    leagueId: string,
+    prevState: UpdateLeagueState | null,
+    formData: FormData
+): Promise<UpdateLeagueState> {
     const session = await auth();
     if (!session?.user?.id) {
         return { message: 'Unauthorized' };
     }
 
     const name = formData.get('name') as string;
-    const draftType = formData.get('draftType') as any;
-    const maxKeepers = parseInt(formData.get('maxKeepers') as string) || 0;
-    const qbCount = parseInt(formData.get('qbCount') as string) || 0;
-    const rbCount = parseInt(formData.get('rbCount') as string) || 0;
-    const wrCount = parseInt(formData.get('wrCount') as string) || 0;
-    const teCount = parseInt(formData.get('teCount') as string) || 0;
-    const flexCount = parseInt(formData.get('flexCount') as string) || 0;
-    const superflexCount = parseInt(formData.get('superflexCount') as string) || 0;
-    const kCount = parseInt(formData.get('kCount') as string) || 0;
-    const defCount = parseInt(formData.get('defCount') as string) || 0;
-    const benchCount = parseInt(formData.get('benchCount') as string) || 0;
-    const timerDurationSeconds = parseInt(formData.get('timerDurationSeconds') as string) || 90;
+    const draftType = formData.get('draftType') as DraftType;
+    const maxKeepers = parseIntField(formData, 'maxKeepers');
+    const rosterCounts = parseRosterCounts(formData);
+    const timerDurationSeconds = parseIntField(formData, 'timerDurationSeconds', 90);
 
     try {
         const league = await prisma.league.findUnique({
@@ -290,53 +318,30 @@ export async function updateLeague(leagueId: string, prevState: any, formData: F
             return { message: 'Unauthorized or League not found' };
         }
 
-        // Calculate total rounds: roster spots minus keeper slots
-        const totalRosterSize = qbCount + rbCount + wrCount + teCount + flexCount + superflexCount + kCount + defCount + benchCount;
-        const totalRounds = Math.max(1, totalRosterSize - maxKeepers);
+        const totalRounds = calculateTotalRounds(rosterCounts, maxKeepers);
 
         await prisma.$transaction(async (tx) => {
-            // Update League name
             await tx.league.update({
                 where: { id: leagueId },
                 data: { name }
             });
 
-            // Update Draft Settings
             await tx.draftSettings.update({
                 where: { leagueId },
                 data: {
                     draftType,
                     maxKeepers,
-                    qbCount,
-                    rbCount,
-                    wrCount,
-                    teCount,
-                    flexCount,
-                    superflexCount,
-                    kCount,
-                    defCount,
-                    benchCount,
+                    ...rosterCounts,
                     totalRounds,
                     timerDurationSeconds,
                 }
             });
         });
 
-        // Regenerate picks AFTER the transaction commits so that
-        // CommissionerService.setDraftOrder (which uses the global prisma client)
-        // reads the newly committed totalRounds value from the database.
+        // Regenerate picks AFTER the transaction commits so setDraftOrder reads
+        // the newly committed totalRounds value from the database
         if (league.draftState?.status === 'NOT_STARTED') {
-            const allTeams = await prisma.team.findMany({
-                where: { leagueId },
-                orderBy: { draftPosition: 'asc' },
-            });
-
-            if (allTeams.length > 0) {
-                await CommissionerService.setDraftOrder({
-                    leagueId,
-                    teamOrderList: allTeams.map(t => t.id)
-                });
-            }
+            await regeneratePicksInDraftOrder(leagueId);
         }
 
         return { success: true, message: 'League updated successfully' };

@@ -17,20 +17,12 @@ import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog';
 import {
   Play,
@@ -53,12 +45,65 @@ import { useDraftSocket } from '@/hooks/useDraftSocket';
 import { updateDraftSettingsAction, getDraftSettingsAction, updatePlayerRankingsAction } from '@/app/actions/commissioner';
 
 // ============================================================================
+// TYPES & HELPERS
+// ============================================================================
+
+type MyTeam = Awaited<ReturnType<typeof getMyTeam>>;
+type RankingUpdateResult = Awaited<ReturnType<typeof updatePlayerRankingsAction>>;
+
+interface ConfirmDialogState {
+  open: boolean;
+  action: string;
+  onConfirm: () => void;
+}
+
+const CLOSED_CONFIRM_DIALOG: ConfirmDialogState = { open: false, action: '', onConfirm: () => {} };
+
+function formatTimer(seconds: number | null): string {
+  if (seconds === null) return '--:--';
+  return `${Math.floor(seconds / 60)}:${(seconds % 60).toString().padStart(2, '0')}`;
+}
+
+// Date -> value for a datetime-local input (shifts to local time, drops seconds)
+function toDateTimeInputValue(date: Date): string {
+  const offsetMs = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+// Fisher-Yates shuffle (returns a new array)
+function shuffle<T>(items: readonly T[]): T[] {
+  const shuffled = [...items];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
+  }
+  return shuffled;
+}
+
+function FullScreenSpinner() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background">
+      <Loader2 className="w-8 h-8 animate-spin" />
+    </div>
+  );
+}
+
+function StatTile({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-muted rounded-lg p-4 text-center">
+      <p className="text-sm text-muted-foreground">{label}</p>
+      {children}
+    </div>
+  );
+}
+
+// ============================================================================
 // COMMISSIONER DASHBOARD
 // ============================================================================
 
 export default function CommissionerDashboard() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-background"><Loader2 className="w-8 h-8 animate-spin" /></div>}>
+    <Suspense fallback={<FullScreenSpinner />}>
       <CommissionerDashboardContent />
     </Suspense>
   );
@@ -68,39 +113,33 @@ function CommissionerDashboardContent() {
   const { data: authSession, status: authStatus } = useSession();
   const searchParams = useSearchParams();
   const leagueId = searchParams.get('leagueId') || '';
-  const [userTeam, setUserTeam] = useState<any | null>(null);
+
+  const [userTeam, setUserTeam] = useState<MyTeam>(null);
   const [timerDuration, setTimerDuration] = useState('90');
   const [pauseReason, setPauseReason] = useState('');
-  const [confirmDialog, setConfirmDialog] = useState<{
-    open: boolean;
-    action: string;
-    onConfirm: () => void;
-  }>({ open: false, action: '', onConfirm: () => { } });
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(CLOSED_CONFIRM_DIALOG);
 
   const [maxKeepers, setMaxKeepers] = useState(3);
   const [keeperDeadline, setKeeperDeadline] = useState('');
   const [rankingUpdateStatus, setRankingUpdateStatus] = useState<{
     loading: boolean;
-    result: any | null;
+    result: RankingUpdateResult | null;
   }>({ loading: false, result: null });
 
   // Fetch team and settings
   React.useEffect(() => {
     async function fetchData() {
-      if (authSession?.user?.id && leagueId) {
-        const team = await getMyTeam(leagueId);
-        setUserTeam(team);
+      if (!authSession?.user?.id || !leagueId) return;
 
-        const result = await getDraftSettingsAction(leagueId);
-        if (result.success && result.data) {
-          setMaxKeepers(result.data.maxKeepers || 3);
-          setTimerDuration(result.data.timerDurationSeconds?.toString() || '90');
-          if (result.data.keeperDeadline) {
-            const d = new Date(result.data.keeperDeadline);
-            const offset = d.getTimezoneOffset() * 60000;
-            const localISOTime = (new Date(d.getTime() - offset)).toISOString().slice(0, 16);
-            setKeeperDeadline(localISOTime);
-          }
+      const team = await getMyTeam(leagueId);
+      setUserTeam(team);
+
+      const result = await getDraftSettingsAction(leagueId);
+      if (result.success && result.data) {
+        setMaxKeepers(result.data.maxKeepers || 3);
+        setTimerDuration(result.data.timerDurationSeconds?.toString() || '90');
+        if (result.data.keeperDeadline) {
+          setKeeperDeadline(toDateTimeInputValue(new Date(result.data.keeperDeadline)));
         }
       }
     }
@@ -125,13 +164,14 @@ function CommissionerDashboardContent() {
     teamId: userTeam?.id,
   });
 
-  // Check if session is loaded
+  const handleRankingUpdate = async () => {
+    setRankingUpdateStatus({ loading: true, result: null });
+    const result = await updatePlayerRankingsAction(leagueId);
+    setRankingUpdateStatus({ loading: false, result });
+  };
+
   if (authStatus === 'loading' || (authSession && !userTeam && leagueId)) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Loader2 className="w-8 h-8 animate-spin" />
-      </div>
-    );
+    return <FullScreenSpinner />;
   }
 
   if (!authSession || !userTeam) {
@@ -154,13 +194,14 @@ function CommissionerDashboardContent() {
     );
   }
 
+  // Every destructive control routes through the confirmation dialog
   const handleAction = (action: string, onConfirm: () => void) => {
     setConfirmDialog({ open: true, action, onConfirm });
   };
 
   const executeAction = () => {
     confirmDialog.onConfirm();
-    setConfirmDialog({ open: false, action: '', onConfirm: () => { } });
+    setConfirmDialog(CLOSED_CONFIRM_DIALOG);
   };
 
   return (
@@ -273,12 +314,9 @@ function CommissionerDashboardContent() {
                   variant="outline"
                   className="h-24 flex-col gap-2"
                   onClick={() =>
-                    handleAction('Randomize Order', () => {
-                      const shuffled = [...state.draftOrder]
-                        .sort(() => Math.random() - 0.5)
-                        .map((t) => t.id);
-                      actions.updateOrder(shuffled);
-                    })
+                    handleAction('Randomize Order', () =>
+                      actions.updateOrder(shuffle(state.draftOrder).map((t) => t.id))
+                    )
                   }
                   disabled={state.status !== 'NOT_STARTED'}
                 >
@@ -301,11 +339,7 @@ function CommissionerDashboardContent() {
                 <div className="flex items-center gap-3">
                   <Button
                     variant="outline"
-                    onClick={async () => {
-                      setRankingUpdateStatus({ loading: true, result: null });
-                      const result = await updatePlayerRankingsAction(leagueId);
-                      setRankingUpdateStatus({ loading: false, result });
-                    }}
+                    onClick={handleRankingUpdate}
                     disabled={rankingUpdateStatus.loading}
                     className="gap-2"
                   >
@@ -331,32 +365,22 @@ function CommissionerDashboardContent() {
 
               {/* Current Status */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="bg-muted rounded-lg p-4 text-center">
-                  <p className="text-sm text-muted-foreground">Current Pick</p>
+                <StatTile label="Current Pick">
                   <p className="text-3xl font-bold">{state.currentPick}</p>
-                </div>
-                <div className="bg-muted rounded-lg p-4 text-center">
-                  <p className="text-sm text-muted-foreground">Current Round</p>
+                </StatTile>
+                <StatTile label="Current Round">
                   <p className="text-3xl font-bold">{state.currentRound}</p>
-                </div>
-                <div className="bg-muted rounded-lg p-4 text-center">
-                  <p className="text-sm text-muted-foreground">On The Clock</p>
+                </StatTile>
+                <StatTile label="On The Clock">
                   <p className="text-lg font-semibold truncate">
                     {state.currentTeam?.name || '-'}
                   </p>
-                </div>
-                <div className="bg-muted rounded-lg p-4 text-center">
-                  <p className="text-sm text-muted-foreground">Timer</p>
+                </StatTile>
+                <StatTile label="Timer">
                   <p className="text-3xl font-bold font-mono">
-                    {state.timerSecondsRemaining !== null
-                      ? `${Math.floor(state.timerSecondsRemaining / 60)}:${(
-                        state.timerSecondsRemaining % 60
-                      )
-                        .toString()
-                        .padStart(2, '0')}`
-                      : '--:--'}
+                    {formatTimer(state.timerSecondsRemaining)}
                   </p>
-                </div>
+                </StatTile>
               </div>
 
               <Separator />
@@ -562,9 +586,7 @@ function CommissionerDashboardContent() {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() =>
-                setConfirmDialog({ open: false, action: '', onConfirm: () => { } })
-              }
+              onClick={() => setConfirmDialog(CLOSED_CONFIRM_DIALOG)}
             >
               Cancel
             </Button>

@@ -5,7 +5,6 @@
 
 import React, { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -23,7 +22,6 @@ import { SidebarRoster } from '@/components/draft/SidebarRoster';
 import { DraftTimer } from '@/components/draft/DraftTimer';
 import { TradeModal, IncomingTradePopup } from '@/components/trade/TradeModal';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
-import { TeamRosters } from '@/components/draft/TeamRosters';
 import { useSession, signOut } from 'next-auth/react';
 import { getMyTeam } from '@/lib/actions';
 import { InviteLinkButton } from '@/components/league/InviteLinkButton';
@@ -34,7 +32,6 @@ import {
   Settings,
   LogOut,
   Bell,
-  ArrowLeftRight,
   RefreshCw,
   AlertTriangle,
   Shield,
@@ -44,14 +41,53 @@ import {
   ArrowLeft,
   Search,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import type { TradeOfferedPayload } from '@/types/socket';
 import { revalidateLeague } from '@/app/actions/league';
 
 // ============================================================================
-// MOCK SESSION (Replace with real auth in production)
+// TYPES & HELPERS
 // ============================================================================
 
-// DELETED useMockSession
+type MyTeam = Awaited<ReturnType<typeof getMyTeam>>;
+
+type SidebarTab = 'players' | 'roster';
+
+function FullScreenSpinner({ message }: { message?: string }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background">
+      <div className="flex flex-col items-center gap-4">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+        {message && <p className="text-muted-foreground font-medium">{message}</p>}
+      </div>
+    </div>
+  );
+}
+
+function FullScreenNotice({
+  icon: Icon,
+  iconClassName,
+  title,
+  children,
+}: {
+  icon: LucideIcon;
+  iconClassName: string;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background">
+      <div className="text-center max-w-md p-6">
+        <Icon className={`w-12 h-12 mx-auto mb-4 ${iconClassName}`} />
+        <h1 className="text-2xl font-bold mb-2">{title}</h1>
+        <p className="text-muted-foreground mb-6">{children}</p>
+        <Button onClick={() => (window.location.href = '/leagues')}>
+          Back to Dashboard
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 // ============================================================================
 // DRAFT ROOM PAGE
@@ -61,20 +97,19 @@ function DraftRoomContent() {
   const { data: session, status } = useSession();
   const searchParams = useSearchParams();
   const leagueId = searchParams.get('leagueId') || '';
-  const [userTeam, setUserTeam] = useState<any | null>(null);
+  const [userTeam, setUserTeam] = useState<MyTeam>(null);
   const [incomingTrade, setIncomingTrade] = useState<TradeOfferedPayload | null>(null);
   const [notificationCount, setNotificationCount] = useState(0);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
-  const [sidebarTab, setSidebarTab] = useState<'players' | 'roster'>('players');
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('players');
   const [selectedRosterTeamId, setSelectedRosterTeamId] = useState<string | undefined>(undefined);
 
   // Fetch user team info for this league
   useEffect(() => {
     async function fetchTeam() {
       if (session?.user?.id) {
-        const team = await getMyTeam(leagueId);
-        setUserTeam(team);
+        setUserTeam(await getMyTeam(leagueId));
       }
       setIsInitializing(false);
     }
@@ -101,21 +136,10 @@ function DraftRoomContent() {
       }
       setNotificationCount((n) => n + 1);
     },
-    onPickMade: () => {
-      // Clear notification count when viewing
-    },
   });
 
-  // Loading state
   if (status === 'loading' || isInitializing) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-4">
-          <Loader2 className="w-8 h-8 animate-spin text-primary" />
-          <p className="text-muted-foreground font-medium">Loading draft room...</p>
-        </div>
-      </div>
-    );
+    return <FullScreenSpinner message="Loading draft room..." />;
   }
 
   // Redirect to login if no session - middleware handles this usually, but good to have
@@ -126,40 +150,22 @@ function DraftRoomContent() {
 
   if (!leagueId) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center max-w-md p-6">
-          <AlertTriangle className="w-12 h-12 text-destructive mx-auto mb-4" />
-          <h1 className="text-2xl font-bold mb-2">Invalid League</h1>
-          <p className="text-muted-foreground mb-6">
-            No league ID was provided. Please go back to the league dashboard and try again.
-          </p>
-          <Button onClick={() => (window.location.href = '/leagues')}>
-            Back to Dashboard
-          </Button>
-        </div>
-      </div>
+      <FullScreenNotice icon={AlertTriangle} iconClassName="text-destructive" title="Invalid League">
+        No league ID was provided. Please go back to the league dashboard and try again.
+      </FullScreenNotice>
     );
   }
 
   if (!userTeam) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center max-w-md p-6">
-          <Trophy className="w-12 h-12 text-primary mx-auto mb-4" />
-          <h1 className="text-2xl font-bold mb-2">No Team Found</h1>
-          <p className="text-muted-foreground mb-6">
-            You don&apos;t seem to have a team in this league ({leagueId}). Please contact your commissioner for an invite.
-          </p>
-          <Button onClick={() => (window.location.href = '/leagues')}>
-            Back to Dashboard
-          </Button>
-        </div>
-      </div>
+      <FullScreenNotice icon={Trophy} iconClassName="text-primary" title="No Team Found">
+        You don&apos;t seem to have a team in this league ({leagueId}). Please contact your
+        commissioner for an invite.
+      </FullScreenNotice>
     );
   }
 
-  // actions.makePick is already stable (useCallback), use it directly
-  const handleDraftPlayer = actions.makePick;
+  const keepersUrl = `/leagues/${leagueId}/keepers?teamId=${userTeam.id}`;
 
   const handleLogout = () => {
     signOut({ callbackUrl: '/login' });
@@ -332,12 +338,11 @@ function DraftRoomContent() {
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => window.location.href = `/leagues/${leagueId}/keepers?teamId=${userTeam.id}`}
+                onClick={() => window.location.href = keepersUrl}
                 title="Select Keepers"
               >
                 <Shield className="w-5 h-5" />
               </Button>
-              {/* Logout */}
 
               {/* Logout */}
               <Button variant="ghost" size="icon" onClick={handleLogout}>
@@ -372,9 +377,7 @@ function DraftRoomContent() {
               <p className="text-sm text-muted-foreground">Please review and declare your keepers before the draft begins.</p>
             </div>
           </div>
-          <Button
-            onClick={() => window.location.href = `/leagues/${leagueId}/keepers?teamId=${userTeam.id}`}
-          >
+          <Button onClick={() => window.location.href = keepersUrl}>
             Declare Keepers
           </Button>
         </div>
@@ -404,7 +407,7 @@ function DraftRoomContent() {
 
         {/* Tabbed Sidebar - ~30% */}
         <div className="flex-[3] min-w-[320px] max-w-[420px] h-full border-l border-slate-200 flex flex-col bg-white overflow-hidden">
-          <Tabs value={sidebarTab} onValueChange={(v) => setSidebarTab(v as 'players' | 'roster')} className="flex flex-col h-full">
+          <Tabs value={sidebarTab} onValueChange={(v) => setSidebarTab(v as SidebarTab)} className="flex flex-col h-full">
             <TabsList className="w-full rounded-none border-b border-slate-200 bg-slate-50 h-9 flex-shrink-0 px-1">
               <TabsTrigger
                 value="players"
@@ -426,7 +429,7 @@ function DraftRoomContent() {
               <PlayerPool
                 players={state.availablePlayers}
                 isMyTurn={isMyTurn}
-                onDraftPlayer={handleDraftPlayer}
+                onDraftPlayer={actions.makePick}
                 isLoading={!state.isConnected}
                 teamQueue={state.teamQueues[userTeam.id] || []}
                 onUpdateQueue={(playerIds) => actions.updateQueue(userTeam.id, playerIds)}
@@ -456,26 +459,7 @@ function DraftRoomContent() {
       {/* Incoming Trade Popup */}
       {incomingTrade && (
         <IncomingTradePopup
-          trade={{
-            tradeId: incomingTrade.tradeId,
-            initiatorTeam: incomingTrade.initiatorTeam,
-            initiatorAssets: incomingTrade.initiatorAssets.map((a) => ({
-              id: a.id,
-              assetType: a.assetType,
-              draftPick: a.draftPick,
-              player: a.player,
-              futurePickSeason: a.futurePickSeason,
-              futurePickRound: a.futurePickRound,
-            })),
-            receiverAssets: incomingTrade.receiverAssets.map((a) => ({
-              id: a.id,
-              assetType: a.assetType,
-              draftPick: a.draftPick,
-              player: a.player,
-              futurePickSeason: a.futurePickSeason,
-              futurePickRound: a.futurePickRound,
-            })),
-          }}
+          trade={incomingTrade}
           onAccept={(tradeId) => {
             actions.acceptTrade(tradeId);
             setIncomingTrade(null);
@@ -499,12 +483,7 @@ function DraftRoomContent() {
               <Button onClick={() => window.location.reload()}>
                 Try Reloading
               </Button>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  signOut({ callbackUrl: '/login' });
-                }}
-              >
+              <Button variant="outline" onClick={handleLogout}>
                 Sign Out
               </Button>
             </div>
@@ -517,7 +496,7 @@ function DraftRoomContent() {
 
 export default function DraftRoom() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-background"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>}>
+    <Suspense fallback={<FullScreenSpinner />}>
       <DraftRoomContent />
     </Suspense>
   );

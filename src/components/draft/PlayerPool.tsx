@@ -3,15 +3,27 @@
 
 'use client';
 
-import React, { useState, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Search, Star, Info, GripVertical } from 'lucide-react';
-import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import type { PlayerSummary } from '@/types/socket';
+import { Search, Star, GripVertical } from 'lucide-react';
+import {
+    DragDropContext,
+    Droppable,
+    Draggable,
+    type DropResult,
+    type DraggableProvidedDragHandleProps,
+} from '@hello-pangea/dnd';
+import type {
+    DraftPickSummary,
+    PlayerSummary,
+    RosterPlayer,
+    RosterSettings,
+} from '@/types/socket';
+import { getRestrictedPositions, normalizePosition } from '@/lib/roster-restrictions';
+import { positionBadgeColors } from './position-styles';
 import {
     Tooltip,
     TooltipContent,
@@ -31,138 +43,22 @@ interface PlayerPoolProps {
     teamQueue: PlayerSummary[];
     onUpdateQueue: (playerIds: string[]) => void;
     onToggleQueue: (playerId: string) => void;
-    rosterSettings?: any;
-    teamRosters?: Record<string, any[]>;
+    rosterSettings?: RosterSettings;
+    teamRosters?: Record<string, RosterPlayer[]>;
     currentTeamId?: string | null;
     myTeamId?: string | null;
-    allPicks?: any[];
+    allPicks?: DraftPickSummary[];
 }
 
 type PositionFilter = 'ALL' | 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DST';
 
-// ============================================================================
-// POSITIONAL REQUIREMENT LOGIC
-// ============================================================================
+const POSITION_FILTERS: readonly PositionFilter[] = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST'];
 
-function getRestrictedPositions(roster: any[] = [], settings: any = {}, remainingPicks: number = 999) {
-    if (!settings) return [];
-
-    const counts: Record<string, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
-    roster.forEach(p => {
-        const pos = p.position as string;
-        const targetPos = pos === 'DST' ? 'DEF' : pos;
-        if (counts[targetPos] !== undefined) {
-            counts[targetPos] = (counts[targetPos] || 0) + 1;
-        }
-    });
-
-    let remQB = settings.qbCount || 0;
-    let remRB = settings.rbCount || 0;
-    let remWR = settings.wrCount || 0;
-    let remTE = settings.teCount || 0;
-    let remK = settings.kCount || 0;
-    let remDEF = settings.defCount || 0;
-    let remFLEX = settings.flexCount || 0;
-    let remSFLEX = settings.superflexCount || 0;
-
-    // 1. Primary slots
-    let leftQB = Math.max(0, (counts.QB || 0) - remQB);
-    remQB = Math.max(0, remQB - (counts.QB || 0));
-
-    let leftRB = Math.max(0, (counts.RB || 0) - remRB);
-    remRB = Math.max(0, remRB - (counts.RB || 0));
-
-    let leftWR = Math.max(0, (counts.WR || 0) - remWR);
-    remWR = Math.max(0, remWR - (counts.WR || 0));
-
-    let leftTE = Math.max(0, (counts.TE || 0) - remTE);
-    remTE = Math.max(0, remTE - (counts.TE || 0));
-
-    let leftK = Math.max(0, (counts.K || 0) - remK);
-    remK = Math.max(0, remK - (counts.K || 0));
-
-    let leftDEF = Math.max(0, (counts.DEF || 0) - remDEF);
-    remDEF = Math.max(0, remDEF - (counts.DEF || 0));
-
-    // 2. FLEX (RB/WR/TE)
-    const fillingFLEX = Math.min(remFLEX, leftRB + leftWR + leftTE);
-    let fNeed = fillingFLEX;
-    let uRB = Math.min(fNeed, leftRB); leftRB -= uRB; fNeed -= uRB;
-    let uWR = Math.min(fNeed, leftWR); leftWR -= uWR; fNeed -= uWR;
-    let uTE = Math.min(fNeed, leftTE); leftTE -= uTE;
-    remFLEX -= fillingFLEX;
-
-    // 3. SFLEX (QB/RB/WR/TE)
-    const fillingSFLEX = Math.min(remSFLEX, leftQB + leftRB + leftWR + leftTE);
-    let sfNeed = fillingSFLEX;
-    let sQB = Math.min(sfNeed, leftQB); leftQB -= sQB; sfNeed -= sQB;
-    let sRB = Math.min(sfNeed, leftRB); leftRB -= sRB; sfNeed -= sRB;
-    let sWR = Math.min(sfNeed, leftWR); leftWR -= sWR; sfNeed -= sWR;
-    let sTE = Math.min(sfNeed, leftTE); leftTE -= sTE;
-    remSFLEX -= fillingSFLEX;
-
-    const totalEmptyStarters = remQB + remRB + remWR + remTE + remK + remDEF + remFLEX + remSFLEX;
-    const currentBenchCount = leftQB + leftRB + leftWR + leftTE + leftK + leftDEF;
-    const benchLimit = settings.benchCount || 0;
-
-    // If no starters left, no restrictions
-    if (totalEmptyStarters === 0) return [];
-
-    // Exclusive starters = can ONLY be filled by their specific position
-    // Fungible starters = FLEX/SFLEX accept multiple positions
-    const exclusiveUnfilled = remQB + remRB + remWR + remTE + remK + remDEF;
-
-    // TIER 1: remaining picks ≤ exclusive unfilled → every pick must fill an exclusive slot
-    if (remainingPicks <= exclusiveUnfilled) {
-        const restricted = [];
-        if (remQB === 0) restricted.push('QB');
-        if (remRB === 0) restricted.push('RB');
-        if (remWR === 0) restricted.push('WR');
-        if (remTE === 0) restricted.push('TE');
-        if (remK === 0) restricted.push('K');
-        if (remDEF === 0) restricted.push('DEF');
-        return restricted;
-    }
-
-    // TIER 2: remaining picks ≤ total empty starters → allow fungible too
-    if (remainingPicks <= totalEmptyStarters) {
-        const restricted = [];
-        if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
-        if (remRB === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('RB');
-        if (remWR === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('WR');
-        if (remTE === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('TE');
-        if (remK === 0) restricted.push('K');
-        if (remDEF === 0) restricted.push('DEF');
-        return restricted;
-    }
-
-    // TIER 3: plenty of picks — only restrict when bench is full
-    if (currentBenchCount < benchLimit) return [];
-
-    const restricted = [];
-    if (remQB === 0 && remSFLEX === 0) restricted.push('QB');
-    if (remRB === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('RB');
-    if (remWR === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('WR');
-    if (remTE === 0 && remFLEX === 0 && remSFLEX === 0) restricted.push('TE');
-    if (remK === 0) restricted.push('K');
-    if (remDEF === 0) restricted.push('DEF');
-
-    return restricted;
+// "Patrick Mahomes" -> "P. Mahomes"
+function abbreviateName(fullName: string): string {
+    const [first, ...rest] = fullName.split(' ');
+    return `${first?.[0]}. ${rest.join(' ')}`;
 }
-
-// ============================================================================
-// POSITION STYLE HELPERS
-// ============================================================================
-
-const positionBadgeColors: Record<string, string> = {
-    QB: 'bg-pink-500/20 text-pink-500 border-pink-500/50',
-    RB: 'bg-blue-500/20 text-blue-500 border-blue-500/50',
-    WR: 'bg-green-500/20 text-green-500 border-green-500/50',
-    TE: 'bg-yellow-500/20 text-yellow-500 border-yellow-500/50',
-    K: 'bg-gray-500/20 text-gray-500 border-gray-500/50',
-    DEF: 'bg-purple-500/20 text-purple-500 border-purple-500/50',
-    DST: 'bg-purple-500/20 text-purple-500 border-purple-500/50',
-};
 
 // ============================================================================
 // PLAYER POOL COMPONENT
@@ -175,10 +71,8 @@ export function PlayerPool({
     teamQueue,
     onUpdateQueue,
     onToggleQueue,
-    isLoading = false,
     rosterSettings,
     teamRosters,
-    currentTeamId,
     myTeamId,
     allPicks,
 }: PlayerPoolProps) {
@@ -191,45 +85,26 @@ export function PlayerPool({
     const restrictedPositions = useMemo(() => {
         if (!myTeamId || !rosterSettings || !teamRosters) return [];
         const roster = teamRosters[myTeamId] || [];
-        // Count remaining picks for my team
         const myRemainingPicks = allPicks
             ? allPicks.filter(p => p.currentOwnerId === myTeamId && !p.isComplete).length
             : 999;
-        return getRestrictedPositions(roster, rosterSettings, myRemainingPicks);
+        return getRestrictedPositions(
+            roster.map(p => p.position),
+            rosterSettings,
+            myRemainingPicks
+        );
     }, [myTeamId, rosterSettings, teamRosters, allPicks]);
 
-    const isPositionRestricted = (pos: string) => {
-        const targetPos = pos === 'DST' ? 'DEF' : pos;
-        return restrictedPositions.includes(targetPos);
-    };
+    const isPositionRestricted = (pos: string) =>
+        restrictedPositions.includes(normalizePosition(pos));
 
-    // Sync favorites with teamQueue from props
-    // We'll use the teamQueue as the source of truth for "stars"
+    // The teamQueue is the source of truth for "starred" players
     const favorites = useMemo(() => new Set(teamQueue.map(p => p.id)), [teamQueue]);
 
     // Toggle favorite (Add/Remove from Queue)
     const toggleFavorite = (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
         onToggleQueue(id);
-    };
-
-    const moveQueuedPlayer = (id: string, direction: 'UP' | 'DOWN') => {
-        const index = teamQueue.findIndex(p => p.id === id);
-        if (index === -1) return;
-
-        const newQueue = [...teamQueue];
-        if (direction === 'UP' && index > 0) {
-            const temp = newQueue[index] as PlayerSummary;
-            newQueue[index] = newQueue[index - 1] as PlayerSummary;
-            newQueue[index - 1] = temp;
-        } else if (direction === 'DOWN' && index < newQueue.length - 1) {
-            const temp = newQueue[index] as PlayerSummary;
-            newQueue[index] = newQueue[index + 1] as PlayerSummary;
-            newQueue[index + 1] = temp;
-        } else {
-            return;
-        }
-        onUpdateQueue(newQueue.map(p => p.id));
     };
 
     const onDragEnd = (result: DropResult) => {
@@ -243,12 +118,9 @@ export function PlayerPool({
         onUpdateQueue(items.map(p => p.id));
     };
 
-    // Filtered players
     const filteredPlayers = useMemo(() => {
-        let result = [...players];
-
         // Exclude players who are already kept (should be handled by server, but extra safety)
-        result = result.filter(p => !p.keptByTeam);
+        let result = players.filter(p => !p.keptByTeam);
 
         if (search.trim()) {
             const s = search.toLowerCase();
@@ -256,7 +128,7 @@ export function PlayerPool({
         }
 
         if (positionFilter !== 'ALL') {
-            const filter = positionFilter === 'DST' ? 'DEF' : positionFilter;
+            const filter = normalizePosition(positionFilter);
             result = result.filter(p => p.position === filter);
         }
 
@@ -338,7 +210,7 @@ export function PlayerPool({
                         <>
                             {/* Position Filters inside POOL tab */}
                             <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar p-3 bg-slate-50/50">
-                                {(['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST'] as PositionFilter[]).map((pos) => (
+                                {POSITION_FILTERS.map((pos) => (
                                     <button
                                         key={pos}
                                         onClick={() => setPositionFilter(pos)}
@@ -510,7 +382,7 @@ interface PlayerRowProps {
     isFavorited: boolean;
     onToggleFavorite: (id: string, e: React.MouseEvent) => void;
     showOrderControls?: boolean;
-    dragHandleProps?: any;
+    dragHandleProps?: DraggableProvidedDragHandleProps | null;
     isRestricted?: boolean;
 }
 
@@ -571,7 +443,7 @@ const PlayerRow = React.memo(function PlayerRow({
                             "text-slate-900 group-hover:text-blue-600",
                             isRestricted && "text-slate-400"
                         )}>
-                            {player.fullName.split(' ')[0]?.[0]}. {player.fullName.split(' ').slice(1).join(' ')}
+                            {abbreviateName(player.fullName)}
                         </span>
                         {player.injuryStatus && (
                             <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
@@ -637,7 +509,8 @@ const PlayerRow = React.memo(function PlayerRow({
         </div>
     );
 }, (prevProps, nextProps) => {
-    // Custom comparator: only re-render when props that affect output change
+    // Custom comparator: re-render only when props that affect output change.
+    // Callback identity changes are deliberately ignored.
     return (
         prevProps.player.id === nextProps.player.id &&
         prevProps.isMyTurn === nextProps.isMyTurn &&

@@ -1,3 +1,4 @@
+import React from "react";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
@@ -12,7 +13,7 @@ import { EditableTeamName } from "@/components/league/EditableTeamName";
 import { LegacyVault } from "@/components/champions/LegacyVault";
 import { Marketplace } from "@/components/marketplace/Marketplace";
 import type { PastWinnerData, KeeperHighlight } from "@/types/champions";
-import type { TradeBlockPlayerData } from "@/types/marketplace";
+import type { TradeBlockPlayerData, GeneralRosterPlayer } from "@/types/marketplace";
 
 export const dynamic = "force-dynamic";
 
@@ -122,75 +123,38 @@ export default async function LeagueDetailPage({
         orderBy: { createdAt: "desc" },
     });
 
-    // Get my team's roster for the "My Status" tab
-    let myPlayers: {
-        id: string;
-        entryId: string;
-        fullName: string;
-        position: string;
-        nflTeam: string | null;
-        rank: number | null;
-        isKeeper: boolean;
-        isOnBlock: boolean;
-        draftCost: number | null;
-    }[] = [];
-
-    if (myTeamId) {
-        const myTeamFull = league.teams.find((t) => t.id === myTeamId);
-        const rosterEntries = myTeamFull?.players ?? [];
-
-        const myBlockedPlayerIds = new Set(
-            tradeBlockEntries
-                .filter((e) => e.teamId === myTeamId)
-                .map((e) => e.playerId)
-        );
-
-        myPlayers = rosterEntries.map((r) => ({
-            id: r.player.id,
-            entryId: r.id,
-            fullName: r.player.fullName,
-            position: r.player.position,
-            nflTeam: r.player.nflTeam,
-            rank: r.player.rank,
-            isKeeper: r.isKeeper,
-            isOnBlock: myBlockedPlayerIds.has(r.player.id),
-            draftCost: r.keeperRound ?? null,
-        }));
-    }
-
     // ========================================================================
-    // ALL LEAGUE ROSTERS (for browsing)
+    // LEAGUE ROSTERS (for the marketplace tabs)
     // ========================================================================
 
     const blockedPlayerIdsByTeam = new Map<string, Set<string>>();
-    tradeBlockEntries.forEach((e) => {
-        if (!blockedPlayerIdsByTeam.has(e.teamId)) {
-            blockedPlayerIdsByTeam.set(e.teamId, new Set());
-        }
-        blockedPlayerIdsByTeam.get(e.teamId)!.add(e.playerId!);
+    for (const entry of tradeBlockEntries) {
+        const blockedIds = blockedPlayerIdsByTeam.get(entry.teamId) ?? new Set<string>();
+        blockedIds.add(entry.playerId!);
+        blockedPlayerIdsByTeam.set(entry.teamId, blockedIds);
+    }
+
+    const allLeagueRosters: GeneralRosterPlayer[] = league.teams.flatMap((team) => {
+        const teamBlockedIds = blockedPlayerIdsByTeam.get(team.id) ?? new Set<string>();
+        return team.players.map((entry) => ({
+            id: entry.player.id,
+            entryId: entry.id,
+            fullName: entry.player.fullName,
+            position: entry.player.position,
+            nflTeam: entry.player.nflTeam,
+            rank: entry.player.rank,
+            isKeeper: entry.isKeeper,
+            isOnBlock: teamBlockedIds.has(entry.player.id),
+            draftCost: entry.keeperRound ?? null,
+            teamId: team.id,
+            teamName: team.name,
+        }));
     });
 
-    const allLeagueRosters: import("@/types/marketplace").GeneralRosterPlayer[] = [];
-    league.teams.forEach((team) => {
-        const teamBlockedIds = blockedPlayerIdsByTeam.get(team.id) || new Set();
-        team.players.forEach((r) => {
-            allLeagueRosters.push({
-                id: r.player.id,
-                entryId: r.id,
-                fullName: r.player.fullName,
-                position: r.player.position,
-                nflTeam: r.player.nflTeam,
-                rank: r.player.rank,
-                isKeeper: r.isKeeper,
-                isOnBlock: teamBlockedIds.has(r.player.id),
-                draftCost: r.keeperRound ?? null,
-                teamId: team.id,
-                teamName: team.name,
-            });
-        });
-    });
-
-
+    // My team's roster for the "My Status" tab is just my slice of the league rosters
+    const myPlayers = myTeamId
+        ? allLeagueRosters.filter((player) => player.teamId === myTeamId)
+        : [];
 
     // ========================================================================
     // SERIALIZE DATA FOR CLIENT COMPONENTS
@@ -239,6 +203,43 @@ export default async function LeagueDetailPage({
     const totalRounds = league.draftSettings?.totalRounds ?? 14;
     const totalPlayers = league.maxTeams * totalRounds;
 
+    // Draft room entry button per status (none for CANCELLED)
+    const draftAction =
+        draftStatus === "NOT_STARTED"
+            ? {
+                  label: isCommissioner ? "Go to Draft Room" : "Enter Draft Room",
+                  variant: "default" as const,
+                  icon: Play,
+              }
+            : draftStatus === "IN_PROGRESS" || draftStatus === "PAUSED"
+              ? { label: "Join Draft", variant: "default" as const, icon: Play }
+              : draftStatus === "COMPLETED"
+                ? { label: "View Draft Results", variant: "outline" as const, icon: Trophy }
+                : null;
+
+    const settingsRows: [string, string | number][] = league.draftSettings
+        ? [
+              ["Draft Type", league.draftSettings.draftType],
+              ["Total Rounds", league.draftSettings.totalRounds],
+              ["Max Keepers", league.draftSettings.maxKeepers],
+              ["Timer", `${league.draftSettings.timerDurationSeconds}s`],
+          ]
+        : [];
+
+    const rosterSlots: [string, number][] = league.draftSettings
+        ? [
+              ["QB", league.draftSettings.qbCount],
+              ["RB", league.draftSettings.rbCount],
+              ["WR", league.draftSettings.wrCount],
+              ["TE", league.draftSettings.teCount],
+              ["FLEX", league.draftSettings.flexCount],
+              ["SFLEX", league.draftSettings.superflexCount],
+              ["K", league.draftSettings.kCount],
+              ["DEF", league.draftSettings.defCount],
+              ["BN", league.draftSettings.benchCount],
+          ]
+        : [];
+
     // ========================================================================
     // RENDER
     // ========================================================================
@@ -276,47 +277,31 @@ export default async function LeagueDetailPage({
 
             {/* Actions */}
             <div className="flex flex-wrap gap-3 mb-8">
-                {draftStatus === "NOT_STARTED" && (
+                {draftAction && (
                     <Link href={`/draft?leagueId=${league.id}`}>
-                        <Button>
-                            <Play className="mr-2 h-4 w-4" />
-                            {isCommissioner ? "Go to Draft Room" : "Enter Draft Room"}
-                        </Button>
-                    </Link>
-                )}
-                {(draftStatus === "IN_PROGRESS" || draftStatus === "PAUSED") && (
-                    <Link href={`/draft?leagueId=${league.id}`}>
-                        <Button>
-                            <Play className="mr-2 h-4 w-4" />
-                            Join Draft
-                        </Button>
-                    </Link>
-                )}
-                {draftStatus === "COMPLETED" && (
-                    <Link href={`/draft?leagueId=${league.id}`}>
-                        <Button variant="outline">
-                            <Trophy className="mr-2 h-4 w-4" />
-                            View Draft Results
+                        <Button variant={draftAction.variant}>
+                            <draftAction.icon className="mr-2 h-4 w-4" />
+                            {draftAction.label}
                         </Button>
                     </Link>
                 )}
                 {isCommissioner && (
-                    <Link href={`/leagues/${league.id}/keepers`}>
-                        <Button variant="outline">
-                            <Trophy className="mr-2 h-4 w-4" />
-                            Keeper Selection
-                        </Button>
-                    </Link>
+                    <>
+                        <Link href={`/leagues/${league.id}/keepers`}>
+                            <Button variant="outline">
+                                <Trophy className="mr-2 h-4 w-4" />
+                                Keeper Selection
+                            </Button>
+                        </Link>
+                        <Link href={`/leagues/${league.id}/settings`}>
+                            <Button variant="outline">
+                                <Settings className="mr-2 h-4 w-4" />
+                                League Settings
+                            </Button>
+                        </Link>
+                        <InviteLinkButton leagueId={league.id} />
+                    </>
                 )}
-                {isCommissioner && (
-                    <Link href={`/leagues/${league.id}/settings`}>
-                        <Button variant="outline">
-                            <Settings className="mr-2 h-4 w-4" />
-                            League Settings
-                        </Button>
-                    </Link>
-                )}
-                {isCommissioner && <InviteLinkButton leagueId={league.id} />}
             </div>
 
             <div className="grid gap-6 md:grid-cols-2">
@@ -343,7 +328,7 @@ export default async function LeagueDetailPage({
                                             {team.draftPosition}
                                         </div>
                                         <div>
-                                            <EditableTeamName 
+                                            <EditableTeamName
                                                 teamId={team.id}
                                                 leagueId={league.id}
                                                 initialName={team.name}
@@ -388,64 +373,24 @@ export default async function LeagueDetailPage({
                         </CardHeader>
                         <CardContent>
                             <div className="space-y-3 text-sm">
-                                <div className="flex justify-between">
-                                    <span className="text-muted-foreground">Draft Type</span>
-                                    <span className="font-medium">{league.draftSettings.draftType}</span>
-                                </div>
-                                <Separator />
-                                <div className="flex justify-between">
-                                    <span className="text-muted-foreground">Total Rounds</span>
-                                    <span className="font-medium">{league.draftSettings.totalRounds}</span>
-                                </div>
-                                <Separator />
-                                <div className="flex justify-between">
-                                    <span className="text-muted-foreground">Max Keepers</span>
-                                    <span className="font-medium">{league.draftSettings.maxKeepers}</span>
-                                </div>
-                                <Separator />
-                                <div className="flex justify-between">
-                                    <span className="text-muted-foreground">Timer</span>
-                                    <span className="font-medium">{league.draftSettings.timerDurationSeconds}s</span>
-                                </div>
+                                {settingsRows.map(([label, value], index) => (
+                                    <React.Fragment key={label}>
+                                        {index > 0 && <Separator />}
+                                        <div className="flex justify-between">
+                                            <span className="text-muted-foreground">{label}</span>
+                                            <span className="font-medium">{value}</span>
+                                        </div>
+                                    </React.Fragment>
+                                ))}
                                 <Separator />
                                 <h4 className="font-medium pt-2">Roster Slots</h4>
                                 <div className="grid grid-cols-3 gap-2 text-xs">
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>QB</span>
-                                        <span className="font-mono">{league.draftSettings.qbCount}</span>
-                                    </div>
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>RB</span>
-                                        <span className="font-mono">{league.draftSettings.rbCount}</span>
-                                    </div>
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>WR</span>
-                                        <span className="font-mono">{league.draftSettings.wrCount}</span>
-                                    </div>
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>TE</span>
-                                        <span className="font-mono">{league.draftSettings.teCount}</span>
-                                    </div>
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>FLEX</span>
-                                        <span className="font-mono">{league.draftSettings.flexCount}</span>
-                                    </div>
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>SFLEX</span>
-                                        <span className="font-mono">{league.draftSettings.superflexCount}</span>
-                                    </div>
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>K</span>
-                                        <span className="font-mono">{league.draftSettings.kCount}</span>
-                                    </div>
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>DEF</span>
-                                        <span className="font-mono">{league.draftSettings.defCount}</span>
-                                    </div>
-                                    <div className="flex justify-between bg-muted/50 px-2 py-1 rounded">
-                                        <span>BN</span>
-                                        <span className="font-mono">{league.draftSettings.benchCount}</span>
-                                    </div>
+                                    {rosterSlots.map(([label, count]) => (
+                                        <div key={label} className="flex justify-between bg-muted/50 px-2 py-1 rounded">
+                                            <span>{label}</span>
+                                            <span className="font-mono">{count}</span>
+                                        </div>
+                                    ))}
                                 </div>
                             </div>
                         </CardContent>
@@ -459,7 +404,6 @@ export default async function LeagueDetailPage({
             <Marketplace
                 leagueId={league.id}
                 myTeamId={myTeamId}
-
                 tradeBlockEntries={tradeBlockData}
                 myPlayers={myPlayers}
                 leagueRosters={allLeagueRosters}

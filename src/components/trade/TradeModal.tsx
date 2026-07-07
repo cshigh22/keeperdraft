@@ -34,12 +34,24 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { ArrowLeftRight, Package, User, AlertCircle, X } from 'lucide-react';
-import type { TeamSummary, DraftPickSummary, PlayerSummary } from '@/types/socket';
+import { ArrowLeftRight, Package, User, AlertCircle } from 'lucide-react';
+import type {
+  TeamSummary,
+  DraftPickSummary,
+  PlayerSummary,
+  TradeAssetPayload,
+} from '@/types/socket';
 
 // ============================================================================
-// TYPES
+// TYPES & HELPERS
 // ============================================================================
+
+interface ProposalAsset {
+  assetType: string;
+  id: string;
+  season?: number;
+  round?: number;
+}
 
 interface TradeModalProps {
   myTeam: TeamSummary;
@@ -50,17 +62,57 @@ interface TradeModalProps {
   totalRounds: number;
   onProposeTrade: (
     receiverTeamId: string,
-    myAssets: { assetType: string; id: string; season?: number; round?: number }[],
-    theirAssets: { assetType: string; id: string; season?: number; round?: number }[]
+    myAssets: ProposalAsset[],
+    theirAssets: ProposalAsset[]
   ) => void;
   disabled?: boolean;
 }
 
+// A selectable asset in the trade UI (not the persisted TradeAsset row)
 interface TradeAsset {
   type: 'pick' | 'player';
   id: string;
   display: string;
   subtext?: string;
+}
+
+// Future picks have no DraftPick row yet; they're referenced by composite ID
+const FUTURE_PICK_PREFIX = 'FUTURE_PICK:';
+const FUTURE_YEARS_OFFERED = 3;
+
+function toProposalAsset(asset: TradeAsset): ProposalAsset {
+  if (asset.id.startsWith(FUTURE_PICK_PREFIX)) {
+    const [, , year, round] = asset.id.split(':');
+    return {
+      assetType: 'FUTURE_PICK',
+      id: asset.id,
+      season: parseInt(year!),
+      round: parseInt(round!),
+    };
+  }
+  return {
+    assetType: asset.type === 'pick' ? 'DRAFT_PICK' : 'PLAYER',
+    id: asset.id,
+  };
+}
+
+function toggleSetMember(prev: Set<string>, id: string): Set<string> {
+  const next = new Set(prev);
+  if (next.has(id)) {
+    next.delete(id);
+  } else {
+    next.add(id);
+  }
+  return next;
+}
+
+// setState updater that drops selections no longer in the available asset list
+function pruneStaleSelections(available: TradeAsset[]) {
+  return (prev: Set<string>): Set<string> => {
+    const availableIds = new Set(available.map((a) => a.id));
+    const next = new Set([...prev].filter((id) => availableIds.has(id)));
+    return next.size === prev.size ? prev : next;
+  };
 }
 
 // ============================================================================
@@ -115,6 +167,25 @@ interface TradeSummaryProps {
   theirAssets: TradeAsset[];
 }
 
+function GivesList({ teamName, assets }: { teamName: string; assets: TradeAsset[] }) {
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground mb-2">{teamName} gives:</p>
+      {assets.length === 0 ? (
+        <p className="text-sm text-muted-foreground italic">Nothing selected</p>
+      ) : (
+        <ul className="space-y-1">
+          {assets.map((asset) => (
+            <li key={asset.id} className="text-sm">
+              • {asset.display}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function TradeSummary({ myTeamName, theirTeamName, myAssets, theirAssets }: TradeSummaryProps) {
   if (myAssets.length === 0 && theirAssets.length === 0) {
     return (
@@ -129,42 +200,13 @@ function TradeSummary({ myTeamName, theirTeamName, myAssets, theirAssets }: Trad
     <div className="bg-muted/50 rounded-lg p-4">
       <h4 className="font-semibold text-sm mb-3">Trade Summary</h4>
       <div className="grid grid-cols-[1fr,auto,1fr] gap-3 items-start">
-        {/* My team gives */}
-        <div>
-          <p className="text-xs text-muted-foreground mb-2">{myTeamName} gives:</p>
-          {myAssets.length === 0 ? (
-            <p className="text-sm text-muted-foreground italic">Nothing selected</p>
-          ) : (
-            <ul className="space-y-1">
-              {myAssets.map((asset) => (
-                <li key={asset.id} className="text-sm">
-                  • {asset.display}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <GivesList teamName={myTeamName} assets={myAssets} />
 
-        {/* Arrow */}
         <div className="flex items-center justify-center pt-4">
           <ArrowLeftRight className="w-5 h-5 text-muted-foreground" />
         </div>
 
-        {/* Their team gives */}
-        <div>
-          <p className="text-xs text-muted-foreground mb-2">{theirTeamName} gives:</p>
-          {theirAssets.length === 0 ? (
-            <p className="text-sm text-muted-foreground italic">Nothing selected</p>
-          ) : (
-            <ul className="space-y-1">
-              {theirAssets.map((asset) => (
-                <li key={asset.id} className="text-sm">
-                  • {asset.display}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <GivesList teamName={theirTeamName} assets={theirAssets} />
       </div>
     </div>
   );
@@ -197,14 +239,12 @@ export function TradeModal({
 
   const selectedTeam = otherTeams.find((t) => t.id === selectedTeamId);
 
-  // Helper to generate future picks (next 5 years)
-  // Helper to generate assets for a team
-  // Helper to generate assets for a team
+  // All tradeable assets for a team: owned picks, virtual future picks, and players
   const getTeamAssets = useCallback((teamId: string, players: PlayerSummary[]) => {
     const assets: TradeAsset[] = [];
     const currentYear = new Date().getFullYear();
 
-    // 1. Add picks from allPicks owned by this team
+    // 1. Picks from allPicks owned by this team
     allPicks
       .filter((p) => p.currentOwnerId === teamId && !p.isComplete)
       .forEach((pick) => {
@@ -212,7 +252,9 @@ export function TradeModal({
         const originalOwner = allTeams.find((t) => t.id === pick.originalOwnerId);
         assets.push({
           type: 'pick',
-          id: isFuture ? `FUTURE_PICK:${pick.originalOwnerId}:${pick.season}:${pick.round}` : pick.id,
+          id: isFuture
+            ? `${FUTURE_PICK_PREFIX}${pick.originalOwnerId}:${pick.season}:${pick.round}`
+            : pick.id,
           display: isFuture
             ? `${pick.season} Round ${pick.round} Pick`
             : `${pick.season} Round ${pick.round}, Pick ${pick.pickInRound}`,
@@ -222,18 +264,18 @@ export function TradeModal({
         });
       });
 
-    // 2. Add virtual future picks (only if not already traded/represented in allPicks)
+    // 2. Virtual future picks (only if not already traded/represented in allPicks)
     const rounds = totalRounds || 15;
-    for (let year = currentYear + 1; year <= currentYear + 3; year++) {
+    for (let year = currentYear + 1; year <= currentYear + FUTURE_YEARS_OFFERED; year++) {
       for (let round = 1; round <= rounds; round++) {
         const isRepresented = allPicks.some(
-          p => p.season === year && p.round === round && p.originalOwnerId === teamId
+          (p) => p.season === year && p.round === round && p.originalOwnerId === teamId
         );
 
         if (!isRepresented) {
           assets.push({
             type: 'pick',
-            id: `FUTURE_PICK:${teamId}:${year}:${round}`,
+            id: `${FUTURE_PICK_PREFIX}${teamId}:${year}:${round}`,
             display: `${year} Round ${round} Pick`,
             subtext: `Future Draft Pick`,
           });
@@ -241,7 +283,7 @@ export function TradeModal({
       }
     }
 
-    // 3. Add players
+    // 3. Players
     players.forEach((player) => {
       assets.push({
         type: 'player',
@@ -254,16 +296,14 @@ export function TradeModal({
     return assets;
   }, [allPicks, totalRounds, allTeams]);
 
-  // Convert my picks and players to TradeAssets
-  const myTradeAssets: TradeAsset[] = useMemo(() => {
-    return getTeamAssets(myTeam.id, myPlayers);
-  }, [getTeamAssets, myPlayers, myTeam.id]);
+  const myTradeAssets: TradeAsset[] = useMemo(
+    () => getTeamAssets(myTeam.id, myPlayers),
+    [getTeamAssets, myPlayers, myTeam.id]
+  );
 
-  // Their assets based on selected team
   const theirTradeAssets: TradeAsset[] = useMemo(() => {
     if (!selectedTeamId) return [];
-    const theirPlayers = teamRosters[selectedTeamId] || [];
-    return getTeamAssets(selectedTeamId, theirPlayers);
+    return getTeamAssets(selectedTeamId, teamRosters[selectedTeamId] || []);
   }, [selectedTeamId, getTeamAssets, teamRosters]);
 
   // Build selected assets for summary
@@ -272,112 +312,40 @@ export function TradeModal({
 
   // Auto-clear selections that are no longer available
   useEffect(() => {
-    setSelectedMyAssets((prev) => {
-      const next = new Set(prev);
-      let changed = false;
-      prev.forEach((id) => {
-        if (!myTradeAssets.some((a) => a.id === id)) {
-          next.delete(id);
-          changed = true;
-        }
-      });
-      return changed ? next : prev;
-    });
+    setSelectedMyAssets(pruneStaleSelections(myTradeAssets));
   }, [myTradeAssets]);
 
   useEffect(() => {
-    setSelectedTheirAssets((prev) => {
-      const next = new Set(prev);
-      let changed = false;
-      prev.forEach((id) => {
-        if (!theirTradeAssets.some((a) => a.id === id)) {
-          next.delete(id);
-          changed = true;
-        }
-      });
-      return changed ? next : prev;
-    });
+    setSelectedTheirAssets(pruneStaleSelections(theirTradeAssets));
   }, [theirTradeAssets]);
 
   const canPropose =
     selectedTeamId &&
     (selectedMyAssets.size > 0 || selectedTheirAssets.size > 0);
 
-  const handleToggleMyAsset = (id: string) => {
-    setSelectedMyAssets((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
-
-  const handleToggleTheirAsset = (id: string) => {
-    setSelectedTheirAssets((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
+  const resetSelections = () => {
+    setSelectedMyAssets(new Set());
+    setSelectedTheirAssets(new Set());
+    setSelectedTeamId('');
   };
 
   const handlePropose = () => {
     if (!canPropose) return;
 
-    const myAssets = mySelectedAssets.map((a) => {
-      if (a.id.startsWith('FUTURE_PICK:')) {
-        const [, , year, round] = a.id.split(':');
-        return {
-          assetType: 'FUTURE_PICK',
-          id: a.id,
-          season: parseInt(year!),
-          round: parseInt(round!),
-        };
-      }
-      return {
-        assetType: a.type === 'pick' ? 'DRAFT_PICK' : 'PLAYER',
-        id: a.id,
-      };
-    });
+    onProposeTrade(
+      selectedTeamId,
+      mySelectedAssets.map(toProposalAsset),
+      theirSelectedAssets.map(toProposalAsset)
+    );
 
-    const theirAssets = theirSelectedAssets.map((a) => {
-      if (a.id.startsWith('FUTURE_PICK:')) {
-        const [, , year, round] = a.id.split(':');
-        return {
-          assetType: 'FUTURE_PICK',
-          id: a.id,
-          season: parseInt(year!),
-          round: parseInt(round!),
-        };
-      }
-      return {
-        assetType: a.type === 'pick' ? 'DRAFT_PICK' : 'PLAYER',
-        id: a.id,
-      };
-    });
-
-    onProposeTrade(selectedTeamId, myAssets, theirAssets);
-
-    // Reset and close
-    setSelectedMyAssets(new Set());
-    setSelectedTheirAssets(new Set());
-    setSelectedTeamId('');
+    resetSelections();
     setOpen(false);
   };
 
   const handleOpenChange = (newOpen: boolean) => {
     setOpen(newOpen);
     if (!newOpen) {
-      // Reset on close
-      setSelectedMyAssets(new Set());
-      setSelectedTheirAssets(new Set());
-      setSelectedTeamId('');
+      resetSelections();
     }
   };
 
@@ -438,7 +406,9 @@ export function TradeModal({
                             key={asset.id}
                             asset={asset}
                             isSelected={selectedMyAssets.has(asset.id)}
-                            onToggle={() => handleToggleMyAsset(asset.id)}
+                            onToggle={() =>
+                              setSelectedMyAssets((prev) => toggleSetMember(prev, asset.id))
+                            }
                           />
                         ))
                       )}
@@ -472,7 +442,9 @@ export function TradeModal({
                             key={asset.id}
                             asset={asset}
                             isSelected={selectedTheirAssets.has(asset.id)}
-                            onToggle={() => handleToggleTheirAsset(asset.id)}
+                            onToggle={() =>
+                              setSelectedTheirAssets((prev) => toggleSetMember(prev, asset.id))
+                            }
                           />
                         ))
                       )}
@@ -511,12 +483,62 @@ export function TradeModal({
 // INCOMING TRADE POPUP
 // ============================================================================
 
+// Only the fields the popup actually renders — callers may pass a mapped
+// subset of TradeAssetPayload
+type IncomingTradeAsset = Pick<
+  TradeAssetPayload,
+  'id' | 'assetType' | 'draftPick' | 'player' | 'futurePickSeason' | 'futurePickRound'
+>;
+
+function incomingAssetLabel(asset: IncomingTradeAsset): string {
+  if (asset.assetType === 'DRAFT_PICK' && asset.draftPick) {
+    return `R${asset.draftPick.round} Pick`;
+  }
+  if (asset.assetType === 'FUTURE_PICK') {
+    return `${asset.futurePickSeason} R${asset.futurePickRound}`;
+  }
+  return asset.player?.fullName || 'Player';
+}
+
+function IncomingAssetList({
+  label,
+  assets,
+  tone,
+  alignRight,
+}: {
+  label: string;
+  assets: IncomingTradeAsset[];
+  tone: 'gain' | 'loss';
+  alignRight?: boolean;
+}) {
+  return (
+    <div className={cn('space-y-1.5', alignRight && 'text-right')}>
+      <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">{label}</p>
+      <ul className="space-y-1">
+        {assets.map((asset) => (
+          <li
+            key={asset.id}
+            className={cn(
+              'text-[11px] font-bold p-1.5 rounded border truncate',
+              tone === 'gain'
+                ? 'bg-green-50/50 text-green-700 border-green-100'
+                : 'bg-red-50/50 text-red-700 border-red-100'
+            )}
+          >
+            {incomingAssetLabel(asset)}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 interface IncomingTradePopupProps {
   trade: {
     tradeId: string;
     initiatorTeam: TeamSummary;
-    initiatorAssets: any[];
-    receiverAssets: any[];
+    initiatorAssets: IncomingTradeAsset[];
+    receiverAssets: IncomingTradeAsset[];
   };
   onAccept: (tradeId: string) => void;
   onReject: (tradeId: string) => void;
@@ -545,21 +567,7 @@ export function IncomingTradePopup({ trade, onAccept, onReject }: IncomingTradeP
 
         <CardContent className="p-4">
           <div className="grid grid-cols-[1fr,auto,1fr] gap-4 items-center">
-            {/* They offer */}
-            <div className="space-y-1.5">
-              <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">You Get</p>
-              <ul className="space-y-1">
-                {trade.initiatorAssets.map((asset) => (
-                  <li key={asset.id} className="text-[11px] font-bold p-1.5 bg-green-50/50 text-green-700 rounded border border-green-100 truncate">
-                    {asset.assetType === 'DRAFT_PICK' && asset.draftPick
-                      ? `R${asset.draftPick.round} Pick`
-                      : asset.assetType === 'FUTURE_PICK'
-                        ? `${asset.futurePickSeason} R${asset.futurePickRound}`
-                        : asset.player?.fullName || 'Player'}
-                  </li>
-                ))}
-              </ul>
-            </div>
+            <IncomingAssetList label="You Get" assets={trade.initiatorAssets} tone="gain" />
 
             <div className="flex items-center justify-center">
               <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center">
@@ -567,21 +575,7 @@ export function IncomingTradePopup({ trade, onAccept, onReject }: IncomingTradeP
               </div>
             </div>
 
-            {/* You give */}
-            <div className="space-y-1.5 text-right">
-              <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest">You Give</p>
-              <ul className="space-y-1">
-                {trade.receiverAssets.map((asset) => (
-                  <li key={asset.id} className="text-[11px] font-bold p-1.5 bg-red-50/50 text-red-700 rounded border border-red-100 truncate">
-                    {asset.assetType === 'DRAFT_PICK' && asset.draftPick
-                      ? `R${asset.draftPick.round} Pick`
-                      : asset.assetType === 'FUTURE_PICK'
-                        ? `${asset.futurePickSeason} R${asset.futurePickRound}`
-                        : asset.player?.fullName || 'Player'}
-                  </li>
-                ))}
-              </ul>
-            </div>
+            <IncomingAssetList label="You Give" assets={trade.receiverAssets} tone="loss" alignRight />
           </div>
         </CardContent>
 

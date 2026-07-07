@@ -2,7 +2,7 @@
 // Server-side utility to fetch and sync player data from Sleeper
 
 import { prisma } from './prisma';
-import type { Position, PlayerStatus } from '@prisma/client';
+import type { Position, PlayerStatus, Prisma } from '@prisma/client';
 
 // ============================================================================
 // TYPES
@@ -22,6 +22,22 @@ interface SleeperPlayer {
   search_rank: number | null;
 }
 
+interface SleeperTrendingPlayer {
+  player_id: string;
+  count: number;
+}
+
+interface SleeperRoster {
+  roster_id: number;
+  owner_id: string | null;
+  players: string[] | null;
+}
+
+interface SleeperUser {
+  user_id: string;
+  display_name?: string;
+}
+
 interface SeedResult {
   success: boolean;
   totalPlayers: number;
@@ -37,89 +53,57 @@ interface SeedResult {
 
 const SLEEPER_API_BASE = 'https://api.sleeper.app/v1';
 
+const HOUR_SECONDS = 3600;
+const DAY_SECONDS = 86400;
+
+async function fetchFromSleeper<T>(path: string, revalidateSeconds?: number): Promise<T> {
+  const response = await fetch(`${SLEEPER_API_BASE}${path}`, {
+    headers: { Accept: 'application/json' },
+    ...(revalidateSeconds !== undefined && { next: { revalidate: revalidateSeconds } }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Sleeper API error: ${response.status} ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
 export const SleeperAPI = {
   /**
    * Fetch all NFL players from Sleeper API
-   * Note: This is a large payload (~8MB) - call sparingly
+   * Note: This is a large payload (~8MB) - call sparingly (cached for 24h)
    */
-  async fetchAllPlayers(): Promise<Record<string, SleeperPlayer>> {
-    const response = await fetch(`${SLEEPER_API_BASE}/players/nfl`, {
-      headers: {
-        'Accept': 'application/json',
-      },
-      // Cache for 24 hours
-      next: { revalidate: 86400 },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Sleeper API error: ${response.status} ${response.statusText}`);
-    }
-
-    return response.json();
+  fetchAllPlayers(): Promise<Record<string, SleeperPlayer>> {
+    return fetchFromSleeper('/players/nfl', DAY_SECONDS);
   },
 
   /**
-   * Fetch trending players (adds, drops)
+   * Fetch trending players (adds, drops), cached for 1 hour
    */
-  async fetchTrendingPlayers(type: 'add' | 'drop', limit: number = 25): Promise<any[]> {
-    const response = await fetch(
-      `${SLEEPER_API_BASE}/players/nfl/trending/${type}?limit=${limit}`,
-      {
-        headers: { 'Accept': 'application/json' },
-        next: { revalidate: 3600 }, // Cache for 1 hour
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`Sleeper API error: ${response.status}`);
-    }
-
-    return response.json();
+  fetchTrendingPlayers(type: 'add' | 'drop', limit: number = 25): Promise<SleeperTrendingPlayer[]> {
+    return fetchFromSleeper(`/players/nfl/trending/${type}?limit=${limit}`, HOUR_SECONDS);
   },
 
   /**
    * Fetch league data from Sleeper
    */
-  async fetchLeague(leagueId: string): Promise<any> {
-    const response = await fetch(`${SLEEPER_API_BASE}/league/${leagueId}`, {
-      headers: { 'Accept': 'application/json' },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Sleeper API error: ${response.status}`);
-    }
-
-    return response.json();
+  fetchLeague(leagueId: string): Promise<Record<string, unknown>> {
+    return fetchFromSleeper(`/league/${leagueId}`);
   },
 
   /**
    * Fetch rosters for a Sleeper league
    */
-  async fetchRosters(leagueId: string): Promise<any[]> {
-    const response = await fetch(`${SLEEPER_API_BASE}/league/${leagueId}/rosters`, {
-      headers: { 'Accept': 'application/json' },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Sleeper API error: ${response.status}`);
-    }
-
-    return response.json();
+  fetchRosters(leagueId: string): Promise<SleeperRoster[]> {
+    return fetchFromSleeper(`/league/${leagueId}/rosters`);
   },
 
   /**
    * Fetch users in a Sleeper league
    */
-  async fetchLeagueUsers(leagueId: string): Promise<any[]> {
-    const response = await fetch(`${SLEEPER_API_BASE}/league/${leagueId}/users`, {
-      headers: { 'Accept': 'application/json' },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Sleeper API error: ${response.status}`);
-    }
-
-    return response.json();
+  fetchLeagueUsers(leagueId: string): Promise<SleeperUser[]> {
+    return fetchFromSleeper(`/league/${leagueId}/users`);
   },
 };
 
@@ -127,20 +111,17 @@ export const SleeperAPI = {
 // DATABASE SEEDING
 // ============================================================================
 
+const SUPPORTED_POSITIONS: readonly Position[] = ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'];
+
+const UNRANKED_RANK = 9999;
+
 /**
  * Map Sleeper position to our Position enum
  */
 function mapPosition(sleeperPosition: string): Position | null {
-  const positionMap: Record<string, Position> = {
-    'QB': 'QB',
-    'RB': 'RB',
-    'WR': 'WR',
-    'TE': 'TE',
-    'K': 'K',
-    'DEF': 'DEF',
-  };
-
-  return positionMap[sleeperPosition] || null;
+  return (SUPPORTED_POSITIONS as readonly string[]).includes(sleeperPosition)
+    ? (sleeperPosition as Position)
+    : null;
 }
 
 /**
@@ -156,6 +137,22 @@ function mapStatus(sleeperStatus: string): PlayerStatus {
   };
 
   return statusMap[sleeperStatus] || 'ACTIVE';
+}
+
+function toPlayerData(sleeperId: string, player: SleeperPlayer): Prisma.PlayerCreateInput {
+  return {
+    sleeperId,
+    firstName: player.first_name || '',
+    lastName: player.last_name || '',
+    fullName: player.full_name || `${player.first_name || ''} ${player.last_name || ''}`.trim(),
+    position: mapPosition(player.position)!,
+    nflTeam: player.team || null,
+    age: player.age || null,
+    yearsExp: player.years_exp || null,
+    status: mapStatus(player.status),
+    injuryStatus: player.injury_status || null,
+    rank: player.search_rank && player.search_rank > 0 ? player.search_rank : UNRANKED_RANK,
+  };
 }
 
 /**
@@ -180,62 +177,43 @@ export async function seedPlayersFromSleeper(): Promise<SeedResult> {
 
     console.log(`Fetched ${result.totalPlayers} players from Sleeper`);
 
-    // Process in batches to avoid memory issues
+    // Teams (DEF) are identified by position 'DEF' in Sleeper
+    const playersToProcess = playerEntries
+      .filter(
+        ([, player]) =>
+          player.player_id &&
+          player.position &&
+          (SUPPORTED_POSITIONS as readonly string[]).includes(player.position)
+      )
+      .map(([sleeperId, player]) => toPlayerData(sleeperId, player));
+
+    // Upsert one-by-one (createMany has no upsert); log progress per batch
     const BATCH_SIZE = 1000;
 
-    for (let i = 0; i < playerEntries.length; i += BATCH_SIZE) {
-      const batch = playerEntries.slice(i, i + BATCH_SIZE);
-
-      const playersToProcess = batch
-        .filter(([_, player]) => {
-          // Only include players with valid data and supported positions
-          // Teams (DEF) are identified by position 'DEF' in Sleeper
-          return (
-            player.position &&
-            ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'].includes(player.position) &&
-            player.player_id
-          );
-        })
-        .map(([sleeperId, player]) => ({
-          sleeperId,
-          firstName: player.first_name || '',
-          lastName: player.last_name || '',
-          fullName: player.full_name || `${player.first_name || ''} ${player.last_name || ''}`.trim(),
-          position: mapPosition(player.position)!,
-          nflTeam: player.team || null,
-          age: player.age || null,
-          yearsExp: player.years_exp || null,
-          status: mapStatus(player.status),
-          injuryStatus: player.injury_status || null,
-          rank: (player.search_rank !== null && player.search_rank !== undefined && player.search_rank > 0)
-            ? player.search_rank
-            : 9999,
-        }));
-
-      // Use a custom upsert strategy since createMany doesn't support it directly
-      // For each player, either create or update
-      for (const playerData of playersToProcess) {
-        try {
-          await prisma.player.upsert({
-            where: { sleeperId: playerData.sleeperId },
-            update: playerData,
-            create: playerData,
-          });
-          // We can't easily distinguish inserted vs updated without another query, 
-          // but we can increment total processed
-          result.updatedPlayers++;
-        } catch (error) {
-          result.errors.push(`Error processing ${playerData.fullName}: ${error}`);
-          result.skippedPlayers++;
-        }
+    for (const [index, playerData] of playersToProcess.entries()) {
+      try {
+        await prisma.player.upsert({
+          where: { sleeperId: playerData.sleeperId },
+          update: playerData,
+          create: playerData,
+        });
+        // Can't easily distinguish inserted vs updated without another query,
+        // so count everything processed as updated
+        result.updatedPlayers++;
+      } catch (error) {
+        result.errors.push(`Error processing ${playerData.fullName}: ${error}`);
+        result.skippedPlayers++;
       }
 
-      console.log(`Processed batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(playerEntries.length / BATCH_SIZE)}`);
+      if ((index + 1) % BATCH_SIZE === 0 || index === playersToProcess.length - 1) {
+        console.log(
+          `Processed ${index + 1}/${playersToProcess.length} players`
+        );
+      }
     }
 
     result.success = true;
     console.log('Player seeding complete:', result);
-
   } catch (error) {
     result.errors.push(`Fatal error: ${error}`);
     console.error('Player seeding failed:', error);
@@ -265,7 +243,7 @@ export async function updatePlayerRankings(): Promise<{ updated: number; errors:
           },
         });
         result.updated++;
-      } catch (error) {
+      } catch {
         // Player might not exist in our DB - that's okay
       }
     }
@@ -286,28 +264,25 @@ export async function syncSleeperLeague(
   const result = { success: false, errors: [] as string[] };
 
   try {
-    // Fetch Sleeper data
-    const [sleeperLeague, rosters, users] = await Promise.all([
+    // fetchLeague result is unused, but the call validates the league exists
+    // (throws on 404) before we start writing
+    const [, rosters, users] = await Promise.all([
       SleeperAPI.fetchLeague(sleeperLeagueId),
       SleeperAPI.fetchRosters(sleeperLeagueId),
       SleeperAPI.fetchLeagueUsers(sleeperLeagueId),
     ]);
 
-    // Update league with Sleeper ID
+    // Link our league to the Sleeper league
     await prisma.league.update({
       where: { id: ourLeagueId },
       data: { sleeperId: sleeperLeagueId },
     });
 
-    // Create user map
-    const userMap = new Map(users.map((u: any) => [u.user_id, u]));
+    const userById = new Map(users.map((u) => [u.user_id, u]));
 
-    // Process each roster
     for (const roster of rosters) {
-      const sleeperUser = userMap.get(roster.owner_id);
-      if (!sleeperUser) continue;
+      if (!roster.owner_id || !userById.has(roster.owner_id)) continue;
 
-      // Find or create team
       const team = await prisma.team.findFirst({
         where: {
           leagueId: ourLeagueId,
@@ -315,32 +290,31 @@ export async function syncSleeperLeague(
         },
       });
 
-      if (team && roster.players) {
-        // Sync players on roster
-        for (const playerId of roster.players) {
-          const player = await prisma.player.findUnique({
-            where: { sleeperId: playerId },
-          });
+      if (!team || !roster.players) continue;
 
-          if (player) {
-            await prisma.playerRoster.upsert({
-              where: {
-                teamId_playerId: {
-                  teamId: team.id,
-                  playerId: player.id,
-                },
-              },
-              create: {
-                teamId: team.id,
-                playerId: player.id,
-                leagueId: ourLeagueId,
-                isKeeper: false,
-                acquiredVia: 'FREE_AGENT',
-              },
-              update: {},
-            });
-          }
-        }
+      for (const sleeperPlayerId of roster.players) {
+        const player = await prisma.player.findUnique({
+          where: { sleeperId: sleeperPlayerId },
+        });
+
+        if (!player) continue;
+
+        await prisma.playerRoster.upsert({
+          where: {
+            teamId_playerId: {
+              teamId: team.id,
+              playerId: player.id,
+            },
+          },
+          create: {
+            teamId: team.id,
+            playerId: player.id,
+            leagueId: ourLeagueId,
+            isKeeper: false,
+            acquiredVia: 'FREE_AGENT',
+          },
+          update: {},
+        });
       }
     }
 

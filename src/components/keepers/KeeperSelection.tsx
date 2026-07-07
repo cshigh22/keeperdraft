@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { normalizePosition } from '@/lib/roster-restrictions';
 
 // ============================================================================
 // Types
@@ -34,6 +35,8 @@ export type KeeperSelection = {
 };
 
 type PositionFilter = 'ALL' | 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DST';
+
+const POSITION_FILTERS: readonly PositionFilter[] = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST'];
 
 // ============================================================================
 // Position Badge Colors
@@ -86,7 +89,7 @@ export function KeeperSelectionUI({
             result = result.filter(p => p.fullName.toLowerCase().includes(s));
         }
         if (positionFilter !== 'ALL') {
-            const filter = positionFilter === 'DST' ? 'DEF' : positionFilter;
+            const filter = normalizePosition(positionFilter);
             result = result.filter(p => p.position === filter);
         }
         // Sort: selected keepers first, then by rank
@@ -100,23 +103,26 @@ export function KeeperSelectionUI({
     }, [players, search, positionFilter, selections]);
 
     const toggleSelection = (playerId: string) => {
-        const newSelections = new Map(selections);
-        if (newSelections.has(playerId)) {
-            newSelections.delete(playerId);
-        } else {
-            if (newSelections.size >= maxKeepers) return;
-            newSelections.set(playerId, null); // Default to No Cost
-        }
-        setSelections(newSelections);
+        setSelections((prev) => {
+            const next = new Map(prev);
+            if (next.has(playerId)) {
+                next.delete(playerId);
+            } else {
+                if (next.size >= maxKeepers) return prev;
+                next.set(playerId, null); // Default to No Cost
+            }
+            return next;
+        });
         setSaveMessage(null);
     };
 
     const updateRound = (playerId: string, round: number | null) => {
-        const newSelections = new Map(selections);
-        if (newSelections.has(playerId)) {
-            newSelections.set(playerId, round);
-            setSelections(newSelections);
-        }
+        setSelections((prev) => {
+            if (!prev.has(playerId)) return prev;
+            const next = new Map(prev);
+            next.set(playerId, round);
+            return next;
+        });
     };
 
     const currentCount = selections.size;
@@ -132,8 +138,8 @@ export function KeeperSelectionUI({
             }));
             await onSave(payload);
             setSaveMessage('Keepers saved successfully!');
-        } catch (e: any) {
-            setSaveMessage(`Error: ${e.message}`);
+        } catch (e) {
+            setSaveMessage(`Error: ${e instanceof Error ? e.message : String(e)}`);
         } finally {
             setSaving(false);
         }
@@ -180,7 +186,7 @@ export function KeeperSelectionUI({
                         />
                     </div>
                     <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-                        {(['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DST'] as PositionFilter[]).map((pos) => (
+                        {POSITION_FILTERS.map((pos) => (
                             <button
                                 key={pos}
                                 onClick={() => setPositionFilter(pos)}
@@ -294,7 +300,7 @@ export function KeeperSelectionUI({
                                                 <span className="text-xs text-slate-300">—</span>
                                             ) : isSelected ? (
                                                 <Select
-                                                    value={selectedRound === null || selectedRound === undefined ? 'no_cost' : selectedRound.toString()}
+                                                    value={selectedRound == null ? 'no_cost' : selectedRound.toString()}
                                                     onValueChange={(val) => updateRound(player.id, val === 'no_cost' ? null : parseInt(val))}
                                                     disabled={isDeadlinePassed}
                                                 >

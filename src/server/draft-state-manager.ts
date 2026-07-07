@@ -7,8 +7,9 @@ import type {
   Player,
   Prisma,
   PrismaClient,
-  TradeAssetType,
 } from '@prisma/client';
+import { toPlayerSummary, toTeamSummary, toTradeAssetPayload } from './mappers';
+import { getRestrictedPositions, normalizePosition } from '@/lib/roster-restrictions';
 import type { Server } from 'socket.io';
 import type {
   ServerToClientEvents,
@@ -26,7 +27,6 @@ import type {
   DraftStartPayload,
   DraftPausePayload,
   OrderUpdatedPayload,
-  TradeAssetPayload,
   TradeOfferedPayload,
 } from '@/types/socket';
 import { SocketEvents } from '@/types/socket';
@@ -67,58 +67,15 @@ const DEFAULT_DRAFT_STATE: DraftStateCache = {
   timerStartedAt: null,
 };
 
-const CORE_POSITIONS = ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'] as const;
-type CorePosition = (typeof CORE_POSITIONS)[number];
-
-// Fungible starter slots accept several positions; fill order matters and must
-// stay stable (RB→WR→TE, then QB→RB→WR→TE) for restriction math to be deterministic.
-const FLEX_ELIGIBLE: readonly CorePosition[] = ['RB', 'WR', 'TE'];
-const SUPERFLEX_ELIGIBLE: readonly CorePosition[] = ['QB', 'RB', 'WR', 'TE'];
-
 // =============================================================================
 // ROW SHAPES & PURE MAPPERS
+// (shared team/player/trade-asset mappers live in ./mappers)
 // =============================================================================
-
-interface TeamRecord {
-  id: string;
-  name: string;
-  ownerId: string | null;
-  draftPosition: number | null;
-  owner: { name: string | null } | null;
-}
 
 interface RosterEntryWithPlayer {
   isKeeper: boolean;
   keeperRound: number | null;
   player: Player;
-}
-
-interface TradeAssetRecord {
-  id: string;
-  assetType: TradeAssetType;
-  fromTeamId: string;
-  futurePickSeason: number | null;
-  futurePickRound: number | null;
-  draftPick: {
-    id: string;
-    round: number;
-    season: number;
-    overallPickNumber: number | null;
-  } | null;
-  player: Player | null;
-}
-
-function toPlayerSummary(player: Player): PlayerSummary {
-  return {
-    id: player.id,
-    sleeperId: player.sleeperId,
-    fullName: player.fullName,
-    position: player.position,
-    nflTeam: player.nflTeam,
-    rank: player.rank,
-    adp: player.adp,
-    bye: player.byeWeek,
-  };
 }
 
 function toRosterPlayer(entry: RosterEntryWithPlayer): RosterPlayer {
@@ -127,36 +84,6 @@ function toRosterPlayer(entry: RosterEntryWithPlayer): RosterPlayer {
     injuryStatus: entry.player.injuryStatus,
     isKeeper: entry.isKeeper,
     round: entry.keeperRound ?? undefined,
-  };
-}
-
-function toTeamSummary(team: TeamRecord): TeamSummary {
-  return {
-    id: team.id,
-    name: team.name,
-    ownerId: team.ownerId,
-    ownerName: team.owner?.name || 'Open Slot',
-    draftPosition: team.draftPosition || 0,
-  };
-}
-
-function toTradeAssetPayload(asset: TradeAssetRecord, fromTeamName: string): TradeAssetPayload {
-  return {
-    id: asset.id,
-    assetType: asset.assetType,
-    fromTeamId: asset.fromTeamId,
-    fromTeamName,
-    draftPick: asset.draftPick
-      ? {
-          id: asset.draftPick.id,
-          round: asset.draftPick.round,
-          season: asset.draftPick.season,
-          overallPickNumber: asset.draftPick.overallPickNumber ?? undefined,
-        }
-      : undefined,
-    player: asset.player ? toPlayerSummary(asset.player) : undefined,
-    futurePickSeason: asset.futurePickSeason ?? undefined,
-    futurePickRound: asset.futurePickRound ?? undefined,
   };
 }
 
@@ -176,15 +103,6 @@ function toRosterSettings(settings: DraftSettings): RosterSettings {
 
 function timerDurationOf(settings: Pick<DraftSettings, 'timerDurationSeconds'> | null): number {
   return settings?.timerDurationSeconds || DEFAULT_TIMER_SECONDS;
-}
-
-// Legacy data sources use DST for team defenses; the app standardizes on DEF.
-function normalizePosition(position: string): string {
-  return position === 'DST' ? 'DEF' : position;
-}
-
-function isCorePosition(position: string): position is CorePosition {
-  return (CORE_POSITIONS as readonly string[]).includes(position);
 }
 
 export class DraftStateManager {
@@ -1431,82 +1349,11 @@ export class DraftStateManager {
       }),
     ]);
 
-    const rosterCounts: Record<CorePosition, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
-    for (const entry of roster) {
-      const position = normalizePosition(entry.player.position);
-      if (isCorePosition(position)) {
-        rosterCounts[position]++;
-      }
-    }
-
-    const slotCounts: Record<CorePosition, number> = {
-      QB: settings.qbCount,
-      RB: settings.rbCount,
-      WR: settings.wrCount,
-      TE: settings.teCount,
-      K: settings.kCount,
-      DEF: settings.defCount,
-    };
-
-    // Split each position into unfilled dedicated slots vs. overflow players
-    const unfilled = {} as Record<CorePosition, number>;
-    const overflow = {} as Record<CorePosition, number>;
-    for (const position of CORE_POSITIONS) {
-      unfilled[position] = Math.max(0, slotCounts[position] - rosterCounts[position]);
-      overflow[position] = Math.max(0, rosterCounts[position] - slotCounts[position]);
-    }
-
-    // Overflow players fill fungible slots (FLEX first, then SUPERFLEX);
-    // returns the number of fungible slots still unfilled.
-    const fillFungibleSlots = (slotCount: number, eligible: readonly CorePosition[]): number => {
-      let unfilledSlots = slotCount;
-      for (const position of eligible) {
-        const used = Math.min(unfilledSlots, overflow[position]);
-        overflow[position] -= used;
-        unfilledSlots -= used;
-      }
-      return unfilledSlots;
-    };
-
-    const unfilledFlex = fillFungibleSlots(settings.flexCount, FLEX_ELIGIBLE);
-    const unfilledSuperflex = fillFungibleSlots(settings.superflexCount, SUPERFLEX_ELIGIBLE);
-
-    const dedicatedUnfilled = CORE_POSITIONS.reduce((sum, pos) => sum + unfilled[pos], 0);
-    const totalUnfilledStarters = dedicatedUnfilled + unfilledFlex + unfilledSuperflex;
-    const benchUsed = CORE_POSITIONS.reduce((sum, pos) => sum + overflow[pos], 0);
-
-    // If all starters are filled, no restrictions needed
-    if (totalUnfilledStarters === 0) return [];
-
-    // A position is restricted when its dedicated slots are full and — when
-    // fungible slots are considered — no FLEX/SUPERFLEX slot can absorb it.
-    const restrictedPositions = (considerFungibleSlots: boolean): string[] =>
-      CORE_POSITIONS.filter((position) => {
-        if (unfilled[position] > 0) return false;
-        if (!considerFungibleSlots) return true;
-        if (unfilledSuperflex > 0 && SUPERFLEX_ELIGIBLE.includes(position)) return false;
-        if (unfilledFlex > 0 && FLEX_ELIGIBLE.includes(position)) return false;
-        return true;
-      });
-
-    // TIER 1: Remaining picks ≤ unfilled dedicated starters
-    //   → Every pick MUST go toward a dedicated slot. No "wasting" a pick on a fungible slot.
-    //   Example: 3 picks left, need RB(1)+K(1)+DEF(1)+FLEX(1) = 4 starters.
-    //   Dedicated = 3 (RB+K+DEF). All 3 picks must fill dedicated slots → WR restricted.
-    if (remainingPicks <= dedicatedUnfilled) {
-      return restrictedPositions(false);
-    }
-
-    // TIER 2: Remaining picks ≤ total unfilled starters (but > dedicated)
-    //   → Enough picks for dedicated slots but not all starters. Allow fungible positions too.
-    if (remainingPicks <= totalUnfilledStarters) {
-      return restrictedPositions(true);
-    }
-
-    // TIER 3: Plenty of picks remaining — only restrict once the bench is full
-    if (benchUsed < settings.benchCount) return [];
-
-    return restrictedPositions(true);
+    return getRestrictedPositions(
+      roster.map((entry) => entry.player.position),
+      settings,
+      remainingPicks
+    );
   }
 
   // Finds the next uncompleted pick with a higher overall number. Uses the

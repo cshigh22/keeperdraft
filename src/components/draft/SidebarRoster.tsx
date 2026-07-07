@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Lock, Edit2 } from 'lucide-react';
 import type { TeamSummary, RosterPlayer, RosterSettings } from '@/types/socket';
+import { positionBadgeColors } from './position-styles';
 
 interface SidebarRosterProps {
     teams: TeamSummary[];
@@ -30,20 +31,47 @@ interface SidebarRosterProps {
 }
 
 // ============================================================================
-// POSITION STYLE HELPERS
+// SLOT CONFIGURATION
 // ============================================================================
 
 const posStyles: Record<string, string> = {
-    QB: 'bg-pink-500/20 text-pink-500 border-pink-500/50',
-    RB: 'bg-blue-500/20 text-blue-500 border-blue-500/50',
-    WR: 'bg-green-500/20 text-green-500 border-green-500/50',
-    TE: 'bg-yellow-500/20 text-yellow-500 border-yellow-500/50',
-    K: 'bg-gray-500/20 text-gray-500 border-gray-500/50',
-    DEF: 'bg-purple-500/20 text-purple-500 border-purple-500/50',
-    DST: 'bg-purple-500/20 text-purple-500 border-purple-500/50',
+    ...positionBadgeColors,
     FLEX: 'bg-slate-100 text-slate-600 border-slate-200',
     BENCH: 'bg-slate-50 text-slate-400 border-slate-200',
 };
+
+const positionDotColors: Record<string, string> = {
+    QB: 'bg-pink-500',
+    RB: 'bg-blue-500',
+    WR: 'bg-green-500',
+    TE: 'bg-yellow-500',
+};
+
+interface RosterSlot {
+    pos: string;
+    player?: RosterPlayer;
+}
+
+// Slots in display order. `eligible` is undefined for BENCH (accepts anyone).
+const SLOT_CONFIG: {
+    label: string;
+    countKey: keyof RosterSettings;
+    eligible?: readonly string[];
+}[] = [
+    { label: 'QB', countKey: 'qbCount', eligible: ['QB'] },
+    { label: 'RB', countKey: 'rbCount', eligible: ['RB'] },
+    { label: 'WR', countKey: 'wrCount', eligible: ['WR'] },
+    { label: 'TE', countKey: 'teCount', eligible: ['TE'] },
+    { label: 'FLEX', countKey: 'flexCount', eligible: ['RB', 'WR', 'TE'] },
+    { label: 'S-FLEX', countKey: 'superflexCount', eligible: ['QB', 'RB', 'WR', 'TE'] },
+    { label: 'K', countKey: 'kCount', eligible: ['K'] },
+    { label: 'DST', countKey: 'defCount', eligible: ['DEF'] },
+    { label: 'BENCH', countKey: 'benchCount' },
+];
+
+// Fill dedicated slots first, then fungible ones, so a WR doesn't steal a
+// FLEX spot from an overflow RB
+const FILL_PRIORITY = ['QB', 'RB', 'WR', 'TE', 'K', 'DST', 'FLEX', 'S-FLEX', 'BENCH'];
 
 // ============================================================================
 // SIDEBAR ROSTER COMPONENT
@@ -86,43 +114,26 @@ export function SidebarRoster({
 
     // Organize roster into slots
     const organizedRoster = useMemo(() => {
-        const slots: { pos: string; player?: RosterPlayer }[] = [];
-        const add = (n: number, pos: string) => { for (let i = 0; i < n; i++) slots.push({ pos }); };
+        const slots: RosterSlot[] = SLOT_CONFIG.flatMap(({ label, countKey }) =>
+            Array.from({ length: settings[countKey] }, (): RosterSlot => ({ pos: label }))
+        );
 
-        add(settings.qbCount, 'QB');
-        add(settings.rbCount, 'RB');
-        add(settings.wrCount, 'WR');
-        add(settings.teCount, 'TE');
-        add(settings.flexCount, 'FLEX');
-        add(settings.superflexCount, 'S-FLEX');
-        add(settings.kCount, 'K');
-        add(settings.defCount, 'DST');
-        add(settings.benchCount, 'BENCH');
-
+        const eligibleByLabel = new Map(SLOT_CONFIG.map((s) => [s.label, s.eligible]));
         const remaining = [...currentRoster];
 
-        // Priority Fill
-        const fill = (pos: string, matchFn: (p: RosterPlayer) => boolean) => {
-            slots.filter(s => s.pos === pos && !s.player).forEach(slot => {
-                const idx = remaining.findIndex(matchFn);
+        for (const label of FILL_PRIORITY) {
+            const eligible = eligibleByLabel.get(label);
+            for (const slot of slots) {
+                if (slot.pos !== label || slot.player) continue;
+                const idx = remaining.findIndex((p) => !eligible || eligible.includes(p.position));
                 if (idx !== -1) {
                     slot.player = remaining[idx];
                     remaining.splice(idx, 1);
                 }
-            });
-        };
+            }
+        }
 
-        fill('QB', p => p.position === 'QB');
-        fill('RB', p => p.position === 'RB');
-        fill('WR', p => p.position === 'WR');
-        fill('TE', p => p.position === 'TE');
-        fill('K', p => p.position === 'K');
-        fill('DST', p => p.position === 'DEF');
-        fill('FLEX', p => ['RB', 'WR', 'TE'].includes(p.position));
-        fill('S-FLEX', p => ['QB', 'RB', 'WR', 'TE'].includes(p.position));
-        fill('BENCH', () => true);
-
-        // Overflow
+        // Overflow beyond the configured slots still shows up as extra bench rows
         remaining.forEach(p => slots.push({ pos: 'BENCH', player: p }));
 
         return slots;
@@ -266,10 +277,7 @@ export function SidebarRoster({
                             {slot.player && (
                                 <div className={cn(
                                     "w-1.5 h-1.5 rounded-full",
-                                    slot.pos === 'QB' ? 'bg-pink-500' :
-                                        slot.pos === 'RB' ? 'bg-blue-500' :
-                                            slot.pos === 'WR' ? 'bg-green-500' :
-                                                slot.pos === 'TE' ? 'bg-yellow-500' : 'bg-slate-600'
+                                    positionDotColors[slot.pos] || 'bg-slate-600'
                                 )} />
                             )}
                         </div>
