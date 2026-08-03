@@ -45,6 +45,8 @@ export interface DraftState {
   draftOrder: TeamSummary[];
   completedPicks: DraftPickSummary[];
   allPicks: DraftPickSummary[];
+  // The draft's season from the server; 0 until the first state sync
+  season: number;
   availablePlayers: PlayerSummary[];
   teamRosters: Record<string, RosterPlayer[]>;
   pendingTrades: TradeOfferedPayload[];
@@ -120,6 +122,7 @@ const initialState: DraftState = {
   draftOrder: [],
   completedPicks: [],
   allPicks: [],
+  season: 0,
   availablePlayers: [],
   teamRosters: {},
   pendingTrades: [],
@@ -171,6 +174,7 @@ function applyStateSync(prev: DraftState, payload: StateSyncPayload): DraftState
     draftOrder: payload.draftOrder,
     completedPicks: payload.completedPicks,
     allPicks: payload.allPicks,
+    season: payload.season || prev.season,
     availablePlayers: payload.availablePlayers,
     teamRosters: payload.teamRosters,
     pendingTrades: payload.pendingTrades,

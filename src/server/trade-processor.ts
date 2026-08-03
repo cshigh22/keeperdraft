@@ -83,7 +83,9 @@ function parseFutureAssetId(id: string): {
 
 function buildAssetCreateInput(
   asset: AssetInput,
-  fromTeamId: string
+  fromTeamId: string,
+  // Materialized DraftPick row ids for FUTURE_PICK assets, keyed by asset id
+  futurePickIds: Map<string, string>
 ): Prisma.TradeAssetUncheckedCreateWithoutTradeInput {
   const base = {
     fromTeamId,
@@ -97,7 +99,12 @@ function buildAssetCreateInput(
       return { ...base, playerId: asset.id };
     case 'FUTURE_PICK': {
       const { season, round } = parseFutureAssetId(asset.id);
-      return { ...base, futurePickSeason: season, futurePickRound: round };
+      return {
+        ...base,
+        draftPickId: futurePickIds.get(asset.id),
+        futurePickSeason: season,
+        futurePickRound: round,
+      };
     }
     default:
       return base;
@@ -140,6 +147,21 @@ export class TradeProcessor {
     await this.validateAssets(leagueId, initiatorTeamId, initiatorAssets);
     await this.validateAssets(leagueId, receiverTeamId, receiverAssets);
 
+    // Give every future pick a real DraftPick row now, so acceptance can
+    // transfer it by id exactly like a board pick instead of guessing which
+    // row matches a (season, round) pair at execution time.
+    const futurePickIds = new Map<string, string>();
+    for (const [teamId, assets] of [
+      [initiatorTeamId, initiatorAssets],
+      [receiverTeamId, receiverAssets],
+    ] as const) {
+      for (const asset of assets) {
+        if (asset.assetType === 'FUTURE_PICK') {
+          futurePickIds.set(asset.id, await this.materializeFuturePick(leagueId, teamId, asset.id));
+        }
+      }
+    }
+
     const trade = await this.prisma.trade.create({
       data: {
         leagueId,
@@ -149,8 +171,12 @@ export class TradeProcessor {
         expiresAt: expiresAt || new Date(Date.now() + DEFAULT_TRADE_TTL_MS),
         assets: {
           create: [
-            ...initiatorAssets.map((asset) => buildAssetCreateInput(asset, initiatorTeamId)),
-            ...receiverAssets.map((asset) => buildAssetCreateInput(asset, receiverTeamId)),
+            ...initiatorAssets.map((asset) =>
+              buildAssetCreateInput(asset, initiatorTeamId, futurePickIds)
+            ),
+            ...receiverAssets.map((asset) =>
+              buildAssetCreateInput(asset, receiverTeamId, futurePickIds)
+            ),
           ],
         },
       },
@@ -229,9 +255,13 @@ export class TradeProcessor {
       const recipientOf = (asset: TradeAsset): string =>
         asset.fromTeamId === trade.initiatorTeamId ? trade.receiverTeamId : trade.initiatorTeamId;
 
-      // Swap draft picks
+      // Swap draft picks. Board picks and materialized future picks both
+      // carry a draftPickId and transfer by id.
       for (const asset of trade.assets) {
-        if (asset.assetType === 'DRAFT_PICK' && asset.draftPickId) {
+        if (
+          asset.draftPickId &&
+          (asset.assetType === 'DRAFT_PICK' || asset.assetType === 'FUTURE_PICK')
+        ) {
           const updatedPick = await tx.draftPick.update({
             where: { id: asset.draftPickId },
             data: { currentOwnerId: recipientOf(asset) },
@@ -289,8 +319,39 @@ export class TradeProcessor {
     };
   }
 
-  // Future picks may not have a DraftPick row yet: update the existing row if
-  // the sender owns one, otherwise materialize it with the sender as original owner.
+  // Ensures a future pick referenced by composite id has a concrete DraftPick
+  // row, returning its id. validateAssets has already confirmed ownership: an
+  // existing row's currentOwner matches the sender, and a missing row means
+  // the sender is the pick's original owner.
+  private async materializeFuturePick(
+    leagueId: string,
+    fromTeamId: string,
+    assetId: string
+  ): Promise<string> {
+    const { originalOwnerId, season, round } = parseFutureAssetId(assetId);
+    const ownerId = originalOwnerId || fromTeamId;
+
+    const existing = await this.prisma.draftPick.findFirst({
+      where: { leagueId, season, round, originalOwnerId: ownerId },
+    });
+    if (existing) return existing.id;
+
+    const created = await this.prisma.draftPick.create({
+      data: {
+        leagueId,
+        season,
+        round,
+        originalOwnerId: ownerId,
+        currentOwnerId: fromTeamId,
+      },
+    });
+    return created.id;
+  }
+
+  // LEGACY PATH — only for FUTURE_PICK assets persisted before future picks
+  // were materialized at proposal time (no draftPickId on the asset). Update
+  // the existing row if the sender owns one, otherwise materialize it with
+  // the sender as original owner.
   private async transferFuturePick(
     tx: Prisma.TransactionClient,
     trade: TradeWithDetails,
@@ -512,7 +573,10 @@ export class TradeProcessor {
     assets: TradeAsset[]
   ): Promise<void> {
     for (const asset of assets) {
-      if (asset.assetType === 'DRAFT_PICK' && asset.draftPickId) {
+      if (
+        asset.draftPickId &&
+        (asset.assetType === 'DRAFT_PICK' || asset.assetType === 'FUTURE_PICK')
+      ) {
         const pick = await this.prisma.draftPick.findFirst({
           where: {
             id: asset.draftPickId,

@@ -272,6 +272,8 @@ export interface RosterSettings {
 // State sync (full state for reconnection)
 export interface StateSyncPayload {
   leagueId: string;
+  // The league's draft season; picks with a different season are future assets
+  season: number;
   status: DraftStatus;
   currentRound: number;
   currentPick: number;

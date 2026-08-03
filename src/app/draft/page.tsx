@@ -254,6 +254,7 @@ function DraftRoomContent() {
                   allPicks={state.allPicks}
                   teamRosters={state.teamRosters}
                   totalRounds={state.totalRounds}
+                  leagueSeason={state.season}
                   onProposeTrade={actions.proposeTrade}
                 />
               )}
@@ -439,6 +440,7 @@ function DraftRoomContent() {
                 currentTeamId={state.currentTeamId}
                 myTeamId={userTeam.id}
                 allPicks={state.allPicks}
+                draftSeason={state.season}
               />
             </TabsContent>
 

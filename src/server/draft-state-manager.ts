@@ -225,7 +225,7 @@ export class DraftStateManager {
   }
 
   async getFullState(): Promise<StateSyncPayload> {
-    const [state, settings, teams, allPicks, players, pendingTrades, teamRosters, teamQueues] =
+    const [state, settings, teams, allPicks, players, pendingTrades, teamRosters, teamQueues, season] =
       await Promise.all([
         this.getCurrentState(),
         this.prisma.draftSettings.findUnique({ where: { leagueId: this.leagueId } }),
@@ -235,6 +235,7 @@ export class DraftStateManager {
         this.getPendingTrades(),
         this.getTeamRosters(),
         this.getTeamQueues(),
+        this.getLeagueSeason(),
       ]);
 
     const currentTeam = state.currentTeamId
@@ -243,6 +244,7 @@ export class DraftStateManager {
 
     return {
       leagueId: this.leagueId,
+      season,
       status: state.status,
       currentRound: state.currentRound,
       currentPick: state.currentPick,
@@ -1161,11 +1163,14 @@ export class DraftStateManager {
 
     if (!settings) return;
 
-    await tx.draftPick.deleteMany({
-      where: { leagueId: this.leagueId },
-    });
+    const season = await this.getLeagueSeason();
 
-    const season = new Date().getFullYear();
+    // Only this season's board is regenerated. Future-season picks (acquired
+    // or materialized by trades) belong to later drafts and must survive —
+    // deleting them would also null out TradeAsset.draftPickId references.
+    await tx.draftPick.deleteMany({
+      where: { leagueId: this.leagueId, season },
+    });
     const picks: Prisma.DraftPickCreateManyInput[] = [];
     let overallPickNumber = 1;
 
@@ -1341,6 +1346,22 @@ export class DraftStateManager {
     return !draftedPick && !rosterEntry;
   }
 
+  // League.season is the authoritative season for the live draft. Picks from
+  // other seasons (e.g. future picks acquired via trade) belong to later
+  // drafts and must not count toward this one's math.
+  private leagueSeasonCache: number | null = null;
+
+  private async getLeagueSeason(): Promise<number> {
+    if (this.leagueSeasonCache === null) {
+      const league = await this.prisma.league.findUnique({
+        where: { id: this.leagueId },
+        select: { season: true },
+      });
+      this.leagueSeasonCache = league?.season ?? new Date().getFullYear();
+    }
+    return this.leagueSeasonCache;
+  }
+
   // Determines which positions a team may NOT draft, so remaining picks are
   // guaranteed to cover every unfilled starting slot.
   private async getRestrictedPositionsForTeam(teamId: string): Promise<string[]> {
@@ -1349,6 +1370,8 @@ export class DraftStateManager {
     });
 
     if (!settings) return [];
+
+    const season = await this.getLeagueSeason();
 
     // Fetch roster and remaining picks in parallel (exclude marketplace FREE_AGENT entries)
     const [roster, remainingPicks] = await Promise.all([
@@ -1363,6 +1386,7 @@ export class DraftStateManager {
       this.prisma.draftPick.count({
         where: {
           leagueId: this.leagueId,
+          season,
           currentOwnerId: teamId,
           isComplete: false,
         },

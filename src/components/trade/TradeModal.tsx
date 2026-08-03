@@ -60,6 +60,8 @@ interface TradeModalProps {
   allPicks: DraftPickSummary[];
   teamRosters: Record<string, PlayerSummary[]>;
   totalRounds: number;
+  // The league's draft season; picks from later seasons are future assets
+  leagueSeason: number;
   onProposeTrade: (
     receiverTeamId: string,
     myAssets: ProposalAsset[],
@@ -223,6 +225,7 @@ export function TradeModal({
   allPicks,
   teamRosters,
   totalRounds,
+  leagueSeason,
   onProposeTrade,
   disabled = false,
 }: TradeModalProps) {
@@ -242,13 +245,14 @@ export function TradeModal({
   // All tradeable assets for a team: owned picks, virtual future picks, and players
   const getTeamAssets = useCallback((teamId: string, players: PlayerSummary[]) => {
     const assets: TradeAsset[] = [];
-    const currentYear = new Date().getFullYear();
 
-    // 1. Picks from allPicks owned by this team
+    // 1. Picks from allPicks owned by this team. "Future" is measured against
+    // the league's season, not the calendar year — a December draft for next
+    // season must still treat its own board picks as current.
     allPicks
       .filter((p) => p.currentOwnerId === teamId && !p.isComplete)
       .forEach((pick) => {
-        const isFuture = pick.season > currentYear;
+        const isFuture = pick.season > leagueSeason;
         const originalOwner = allTeams.find((t) => t.id === pick.originalOwnerId);
         assets.push({
           type: 'pick',
@@ -266,7 +270,7 @@ export function TradeModal({
 
     // 2. Virtual future picks (only if not already traded/represented in allPicks)
     const rounds = totalRounds || 15;
-    for (let year = currentYear + 1; year <= currentYear + FUTURE_YEARS_OFFERED; year++) {
+    for (let year = leagueSeason + 1; year <= leagueSeason + FUTURE_YEARS_OFFERED; year++) {
       for (let round = 1; round <= rounds; round++) {
         const isRepresented = allPicks.some(
           (p) => p.season === year && p.round === round && p.originalOwnerId === teamId
@@ -294,7 +298,7 @@ export function TradeModal({
     });
 
     return assets;
-  }, [allPicks, totalRounds, allTeams]);
+  }, [allPicks, totalRounds, allTeams, leagueSeason]);
 
   const myTradeAssets: TradeAsset[] = useMemo(
     () => getTeamAssets(myTeam.id, myPlayers),

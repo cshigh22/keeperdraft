@@ -49,6 +49,7 @@ interface PlayerPoolProps {
     currentTeamId?: string | null;
     myTeamId?: string | null;
     allPicks?: DraftPickSummary[];
+    draftSeason?: number;
 }
 
 type PositionFilter = 'ALL' | 'QB' | 'RB' | 'WR' | 'TE' | 'K' | 'DST';
@@ -76,25 +77,30 @@ export function PlayerPool({
     teamRosters,
     myTeamId,
     allPicks,
+    draftSeason,
 }: PlayerPoolProps) {
     const [search, setSearch] = useState('');
     const [positionFilter, setPositionFilter] = useState<PositionFilter>('ALL');
     const [showOnlyFavorites, setShowOnlyFavorites] = useState(false);
     const [activeTab, setActiveTab] = useState<'POOL' | 'QUEUE'>('POOL');
 
-    // Calculate restricted positions for the current user's team
+    // Calculate restricted positions for the current user's team. Only picks
+    // from the draft's own season count — acquired future picks can't fill
+    // this season's roster.
     const restrictedPositions = useMemo(() => {
-        if (!myTeamId || !rosterSettings || !teamRosters) return [];
+        if (!myTeamId || !rosterSettings || !teamRosters || !draftSeason) return [];
         const roster = teamRosters[myTeamId] || [];
         const myRemainingPicks = allPicks
-            ? allPicks.filter(p => p.currentOwnerId === myTeamId && !p.isComplete).length
+            ? allPicks.filter(
+                  p => p.season === draftSeason && p.currentOwnerId === myTeamId && !p.isComplete
+              ).length
             : 999;
         return getRestrictedPositions(
             roster.map(p => p.position),
             rosterSettings,
             myRemainingPicks
         );
-    }, [myTeamId, rosterSettings, teamRosters, allPicks]);
+    }, [myTeamId, rosterSettings, teamRosters, allPicks, draftSeason]);
 
     const isPositionRestricted = (pos: string) =>
         restrictedPositions.includes(normalizePosition(pos));
