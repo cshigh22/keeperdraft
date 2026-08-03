@@ -514,9 +514,29 @@ export class DraftStateManager {
         throw new Error('No teams in league');
       }
 
-      const allKeepersCount = await this.prisma.playerRoster.count({
+      // Keeper counts can drift past maxKeepers through paths that don't
+      // revalidate (lowering the limit after selections, trading keeper-flagged
+      // players), which corrupts every team's pick math once the board is
+      // generated. Refuse to start until the commissioner resolves it.
+      const keeperCounts = await this.prisma.playerRoster.groupBy({
+        by: ['teamId'],
         where: { leagueId: this.leagueId, isKeeper: true },
+        _count: { _all: true },
       });
+
+      const overLimit = keeperCounts.filter((k) => k._count._all > settings.maxKeepers);
+      if (overLimit.length > 0) {
+        const details = overLimit
+          .map((k) => {
+            const teamName = teams.find((t) => t.id === k.teamId)?.name || 'Unknown team';
+            const count = k._count._all;
+            return `${teamName} has ${count} keeper${count === 1 ? '' : 's'}`;
+          })
+          .join(', ');
+        throw new Error(`Cannot start draft: ${details}; league max is ${settings.maxKeepers}`);
+      }
+
+      const allKeepersCount = keeperCounts.reduce((sum, k) => sum + k._count._all, 0);
       console.log(
         `[startDraft] Found ${allKeepersCount} keepers on rosters. Starting draft for remaining spots.`
       );
