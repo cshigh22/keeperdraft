@@ -48,7 +48,8 @@ export function InviteLinkButton({ leagueId }: InviteLinkButtonProps) {
                     Invite Members
                 </CardTitle>
                 <CardDescription>
-                    Generate a link to invite others to join your league.
+                    Generate a link to invite someone to your league. Each link works once,
+                    so generate a new one for each person.
                 </CardDescription>
             </CardHeader>
             <CardContent>
@@ -79,8 +80,16 @@ export function InviteLinkButton({ leagueId }: InviteLinkButtonProps) {
                         </div>
                         <p className="text-xs text-muted-foreground flex items-center gap-1">
                             <ExternalLink className="w-3 h-3" />
-                            Link expires in 7 days
+                            Single use — expires in 7 days
                         </p>
+                        <Button
+                            variant="outline"
+                            onClick={handleGenerate}
+                            disabled={isLoading}
+                            className="w-full"
+                        >
+                            {isLoading ? 'Generating...' : 'Generate Another Link'}
+                        </Button>
                     </div>
                 )}
             </CardContent>

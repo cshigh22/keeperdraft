@@ -13,8 +13,7 @@ export const SocketEvents = {
   DISCONNECT: 'disconnect',
   JOIN_DRAFT_ROOM: 'join_draft_room',
   LEAVE_DRAFT_ROOM: 'leave_draft_room',
-  AUTHENTICATE: 'authenticate',
-  
+
   // Draft lifecycle events
   DRAFT_START: 'draft_start',
   DRAFT_PAUSE: 'draft_pause',
@@ -134,10 +133,10 @@ export interface TradeAssetPayload {
 // ============================================================================
 
 // Join/Leave room
+// The user and their team are resolved from the authenticated handshake, so a
+// client only names the league it wants to join.
 export interface JoinDraftRoomPayload {
   leagueId: string;
-  userId: string;
-  teamId?: string;
 }
 
 // Draft start
@@ -309,7 +308,6 @@ export interface ErrorPayload {
 export interface ClientToServerEvents {
   [SocketEvents.JOIN_DRAFT_ROOM]: (payload: JoinDraftRoomPayload) => void;
   [SocketEvents.LEAVE_DRAFT_ROOM]: (payload: { leagueId: string }) => void;
-  [SocketEvents.AUTHENTICATE]: (payload: { userId: string }) => void;
 
   // Commissioner actions
   [SocketEvents.DRAFT_START]: (payload: { leagueId: string }) => void;
@@ -321,16 +319,17 @@ export interface ClientToServerEvents {
   [SocketEvents.ORDER_UPDATED]: (payload: { leagueId: string; teamOrder: string[] }) => void;
 
   // User actions
-  [SocketEvents.PICK_MADE]: (payload: { leagueId: string; playerId: string; teamId: string }) => void;
+  [SocketEvents.PICK_MADE]: (payload: { leagueId: string; playerId: string }) => void;
   [SocketEvents.TRADE_OFFERED]: (payload: {
     leagueId: string;
     receiverTeamId: string;
     initiatorAssets: { assetType: string; id: string }[];
     receiverAssets: { assetType: string; id: string }[];
   }) => void;
-  [SocketEvents.TRADE_ACCEPTED]: (payload: { leagueId: string; tradeId: string }) => void;
-  [SocketEvents.TRADE_REJECTED]: (payload: { leagueId: string; tradeId: string }) => void;
-  [SocketEvents.TRADE_CANCELLED]: (payload: { leagueId: string; tradeId: string }) => void;
+  // The league is read off the trade record server-side
+  [SocketEvents.TRADE_ACCEPTED]: (payload: { tradeId: string }) => void;
+  [SocketEvents.TRADE_REJECTED]: (payload: { tradeId: string }) => void;
+  [SocketEvents.TRADE_CANCELLED]: (payload: { tradeId: string }) => void;
   [SocketEvents.UPDATE_QUEUE]: (payload: { leagueId: string; teamId: string; playerIds: string[] }) => void;
   [SocketEvents.UPDATE_TEAM]: (payload: { leagueId: string; teamId: string; name: string }) => void;
 }

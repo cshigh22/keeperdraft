@@ -214,14 +214,8 @@ export async function generateInvite(leagueId: string) {
         throw new Error('Only the commissioner can generate invites');
     }
 
-    // Reuse an unexpired token if one exists
-    const existing = await prisma.leagueInvite.findFirst({
-        where: { leagueId, expiresAt: { gt: new Date() } },
-        orderBy: { createdAt: 'desc' }
-    });
-
-    if (existing) return existing.token;
-
+    // A fresh token every time: invites are single-use, so handing out the same
+    // one twice would leave the second person unable to join.
     const invite = await prisma.leagueInvite.create({
         data: {
             leagueId,
@@ -233,23 +227,27 @@ export async function generateInvite(leagueId: string) {
     return invite.token;
 }
 
+// Redeems a single-use invite. Called from a form submission rather than on page
+// load, so merely visiting a link — or being made to visit one — cannot burn an
+// invite or add someone to a league.
 export async function joinLeague(token: string) {
     const session = await auth();
     if (!session?.user?.id) {
         redirect(`/login?callbackUrl=/join/${token}`);
     }
     const userId = session.user.id;
+    const userName = session.user.name;
 
     const invite = await prisma.leagueInvite.findUnique({
         where: { token },
-        include: { league: true }
+        select: { id: true, leagueId: true, expiresAt: true, usedAt: true }
     });
 
     if (!invite || invite.expiresAt < new Date()) {
         throw new Error('Invalid or expired invite');
     }
 
-    // Already a member? Just go to the league
+    // Already a member? Just go to the league, leaving the invite unspent
     const existingMember = await prisma.leagueMember.findUnique({
         where: { userId_leagueId: { userId, leagueId: invite.leagueId } }
     });
@@ -258,35 +256,45 @@ export async function joinLeague(token: string) {
         redirect(`/leagues/${invite.leagueId}`);
     }
 
-    // Claim the first open team slot
-    const emptyTeam = await prisma.team.findFirst({
-        where: {
-            leagueId: invite.leagueId,
-            ownerId: null,
-        },
-        orderBy: { draftPosition: 'asc' }
-    });
-
-    if (!emptyTeam) {
-        throw new Error('League is full');
+    if (invite.usedAt) {
+        throw new Error('This invite has already been used');
     }
 
-    await prisma.$transaction([
-        prisma.leagueMember.create({
-            data: {
-                userId,
-                leagueId: invite.leagueId,
-                role: 'MEMBER'
-            }
-        }),
-        prisma.team.update({
-            where: { id: emptyTeam.id },
-            data: {
-                ownerId: userId,
-                name: `${session.user.name}'s Team`
-            }
-        })
-    ]);
+    await prisma.$transaction(async (tx) => {
+        // Claim the invite first. The usedAt filter makes this a no-op for
+        // everyone but the winner if two people redeem the same link at once.
+        const claimedInvite = await tx.leagueInvite.updateMany({
+            where: { id: invite.id, usedAt: null },
+            data: { usedAt: new Date(), usedByUserId: userId }
+        });
+
+        if (claimedInvite.count === 0) {
+            throw new Error('This invite has already been used');
+        }
+
+        const emptyTeam = await tx.team.findFirst({
+            where: { leagueId: invite.leagueId, ownerId: null },
+            orderBy: { draftPosition: 'asc' }
+        });
+
+        if (!emptyTeam) {
+            throw new Error('League is full');
+        }
+
+        // Same guard on the team slot, for the same reason
+        const claimedTeam = await tx.team.updateMany({
+            where: { id: emptyTeam.id, ownerId: null },
+            data: { ownerId: userId, name: `${userName}'s Team` }
+        });
+
+        if (claimedTeam.count === 0) {
+            throw new Error('That team slot was just taken — please try again');
+        }
+
+        await tx.leagueMember.create({
+            data: { userId, leagueId: invite.leagueId, role: 'MEMBER' }
+        });
+    });
 
     redirect(`/leagues/${invite.leagueId}`);
 }

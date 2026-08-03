@@ -13,6 +13,7 @@ import type {
 } from '@/types/socket';
 import { SocketEvents } from '@/types/socket';
 import { prisma } from '@/lib/prisma';
+import { verifySocketToken } from '@/lib/socket-token';
 import { DraftStateManager } from './draft-state-manager';
 import { TradeProcessor } from './trade-processor';
 
@@ -63,6 +64,30 @@ const draftManagers = new Map<string, DraftStateManager>();
 const tradeProcessor = new TradeProcessor(prisma);
 
 // ============================================================================
+// AUTHENTICATION
+// ============================================================================
+
+// Nothing below this point may trust an identity supplied in an event payload.
+// Every connection presents a token minted by the Next.js app from the user's
+// session; the id it carries is the only identity this server recognises.
+io.use(async (socket, next) => {
+  try {
+    const userId = await verifySocketToken(socket.handshake.auth?.token);
+
+    if (!userId) {
+      next(new Error('UNAUTHENTICATED'));
+      return;
+    }
+
+    socket.data.userId = userId;
+    next();
+  } catch (error) {
+    console.error('Socket authentication failed:', error);
+    next(new Error('AUTH_UNAVAILABLE'));
+  }
+});
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
@@ -87,17 +112,32 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+// A socket's privileges are scoped to the one league it joined. Without this the
+// commissioner of any league could aim a commissioner-only event at another one.
+function requireLeague(socket: DraftSocket, leagueId: string): boolean {
+  if (socket.data.leagueId === leagueId) return true;
+  emitError(socket, 'UNAUTHORIZED', 'You have not joined this league');
+  return false;
+}
+
 // Emits UNAUTHORIZED and returns false when the socket isn't the commissioner
-function requireCommissioner(socket: DraftSocket, action: string): boolean {
+function requireCommissioner(socket: DraftSocket, leagueId: string, action: string): boolean {
+  if (!requireLeague(socket, leagueId)) return false;
   if (socket.data.isCommissioner) return true;
   emitError(socket, 'UNAUTHORIZED', `Only the commissioner can ${action}`);
   return false;
 }
 
-// Team-scoped actions are allowed for the team's owner or the commissioner
-async function canManageTeam(socket: DraftSocket, teamId: string): Promise<boolean> {
-  const team = await prisma.team.findUnique({
-    where: { id: teamId },
+// Team-scoped actions are allowed for the team's owner or the commissioner.
+// leagueId is passed explicitly (rather than read off socket.data) because
+// Prisma silently drops an `undefined` filter, which would widen the lookup.
+async function canManageTeam(
+  socket: DraftSocket,
+  leagueId: string,
+  teamId: string
+): Promise<boolean> {
+  const team = await prisma.team.findFirst({
+    where: { id: teamId, leagueId },
     select: { ownerId: true },
   });
   return !!team && (team.ownerId === socket.data.userId || socket.data.isCommissioner);
@@ -119,17 +159,9 @@ async function getTeamForUser(userId: string, leagueId: string): Promise<string 
 // ============================================================================
 
 function registerRoomHandlers(socket: DraftSocket): void {
-  // User identification (global, e.g. for trade notifications outside the draft)
-  socket.on(SocketEvents.AUTHENTICATE, (payload: { userId: string }) => {
-    const { userId } = payload;
-    if (userId) {
-      socket.join(`user:${userId}`);
-      console.log(`Socket ${socket.id} authenticated as user ${userId}`);
-    }
-  });
-
   socket.on(SocketEvents.JOIN_DRAFT_ROOM, async (payload) => {
-    const { leagueId, userId, teamId } = payload;
+    const { leagueId } = payload;
+    const userId = socket.data.userId;
 
     try {
       // Verify user has access to this league
@@ -176,10 +208,10 @@ function registerRoomHandlers(socket: DraftSocket): void {
         return;
       }
 
-      // Store user data on socket
-      socket.data.userId = userId;
+      // Scope this socket to the league. The team is looked up rather than taken
+      // from the payload so a client cannot act as a team it does not own.
       socket.data.leagueId = leagueId;
-      socket.data.teamId = teamId || (await getTeamForUser(userId, leagueId)) || undefined;
+      socket.data.teamId = (await getTeamForUser(userId, leagueId)) || undefined;
       socket.data.isCommissioner = member.league.commissionerId === userId;
 
       await socket.join(getRoomName(leagueId));
@@ -198,6 +230,15 @@ function registerRoomHandlers(socket: DraftSocket): void {
   socket.on(SocketEvents.LEAVE_DRAFT_ROOM, async (payload) => {
     const { leagueId } = payload;
     await socket.leave(getRoomName(leagueId));
+
+    // Drop the league scope with the room, so a stale commissioner flag cannot
+    // outlive membership of the league it was granted for.
+    if (socket.data.leagueId === leagueId) {
+      socket.data.leagueId = undefined;
+      socket.data.teamId = undefined;
+      socket.data.isCommissioner = false;
+    }
+
     console.log(`User ${socket.data.userId} left draft room for league ${leagueId}`);
   });
 }
@@ -208,7 +249,7 @@ function registerRoomHandlers(socket: DraftSocket): void {
 
 function registerDraftControlHandlers(socket: DraftSocket): void {
   socket.on(SocketEvents.DRAFT_START, async ({ leagueId }) => {
-    if (!requireCommissioner(socket, 'start the draft')) return;
+    if (!requireCommissioner(socket, leagueId, 'start the draft')) return;
 
     try {
       await getDraftManager(leagueId).startDraft();
@@ -219,7 +260,7 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
   });
 
   socket.on(SocketEvents.DRAFT_PAUSE, async ({ leagueId, reason }) => {
-    if (!requireCommissioner(socket, 'pause the draft')) return;
+    if (!requireCommissioner(socket, leagueId, 'pause the draft')) return;
 
     try {
       await getDraftManager(leagueId).pauseDraft(
@@ -233,7 +274,7 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
   });
 
   socket.on(SocketEvents.DRAFT_RESUME, async ({ leagueId }) => {
-    if (!requireCommissioner(socket, 'resume the draft')) return;
+    if (!requireCommissioner(socket, leagueId, 'resume the draft')) return;
 
     try {
       await getDraftManager(leagueId).resumeDraft();
@@ -244,7 +285,7 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
   });
 
   socket.on(SocketEvents.DRAFT_RESET, async ({ leagueId }) => {
-    if (!requireCommissioner(socket, 'reset the draft')) return;
+    if (!requireCommissioner(socket, leagueId, 'reset the draft')) return;
 
     try {
       await getDraftManager(leagueId).resetDraft();
@@ -254,7 +295,17 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
     }
   });
 
-  socket.on(SocketEvents.PICK_MADE, async ({ leagueId, playerId, teamId }) => {
+  socket.on(SocketEvents.PICK_MADE, async ({ leagueId, playerId }) => {
+    if (!requireLeague(socket, leagueId)) return;
+
+    // Always the socket's own team. Picking for anyone else is FORCE_PICK,
+    // which is commissioner-gated.
+    const teamId = socket.data.teamId;
+    if (!teamId) {
+      emitError(socket, 'NO_TEAM', 'You do not have a team in this league');
+      return;
+    }
+
     try {
       await getDraftManager(leagueId).makePick(teamId, playerId, socket.data.isCommissioner);
     } catch (error) {
@@ -264,7 +315,7 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
   });
 
   socket.on(SocketEvents.FORCE_PICK, async ({ leagueId, playerId }) => {
-    if (!requireCommissioner(socket, 'force a pick')) return;
+    if (!requireCommissioner(socket, leagueId, 'force a pick')) return;
 
     try {
       await getDraftManager(leagueId).forcePick(playerId);
@@ -275,7 +326,7 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
   });
 
   socket.on(SocketEvents.PICK_UNDONE, async ({ leagueId }) => {
-    if (!requireCommissioner(socket, 'undo picks')) return;
+    if (!requireCommissioner(socket, leagueId, 'undo picks')) return;
 
     try {
       await getDraftManager(leagueId).undoLastPick();
@@ -286,7 +337,7 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
   });
 
   socket.on(SocketEvents.ORDER_UPDATED, async ({ leagueId, teamOrder }) => {
-    if (!requireCommissioner(socket, 'update the draft order')) return;
+    if (!requireCommissioner(socket, leagueId, 'update the draft order')) return;
 
     try {
       await getDraftManager(leagueId).setDraftOrder(teamOrder, socket.data.userId!);
@@ -301,9 +352,22 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
 // TRADE HANDLERS
 // ============================================================================
 
+// Trade responses can arrive on the global socket, which has no joined league,
+// so the room to broadcast into comes from the trade itself rather than from a
+// client-supplied id that could point at another league.
+async function getTradeLeagueId(tradeId: string): Promise<string | null> {
+  const trade = await prisma.trade.findUnique({
+    where: { id: tradeId },
+    select: { leagueId: true },
+  });
+  return trade?.leagueId ?? null;
+}
+
 function registerTradeHandlers(socket: DraftSocket): void {
   socket.on(SocketEvents.TRADE_OFFERED, async (payload) => {
     const { leagueId, receiverTeamId, initiatorAssets, receiverAssets } = payload;
+
+    if (!requireLeague(socket, leagueId)) return;
 
     try {
       const initiatorTeamId = socket.data.teamId;
@@ -333,18 +397,24 @@ function registerTradeHandlers(socket: DraftSocket): void {
     }
   });
 
-  socket.on(SocketEvents.TRADE_ACCEPTED, async ({ leagueId, tradeId }) => {
+  socket.on(SocketEvents.TRADE_ACCEPTED, async ({ tradeId }) => {
     try {
-      await handleTradeAccepted(socket, leagueId, tradeId);
+      await handleTradeAccepted(socket, tradeId);
     } catch (error) {
       console.error('Error accepting trade:', error);
       emitError(socket, 'TRADE_ACCEPT_FAILED', errorMessage(error, 'Failed to accept trade'));
     }
   });
 
-  socket.on(SocketEvents.TRADE_REJECTED, async ({ leagueId, tradeId }) => {
+  socket.on(SocketEvents.TRADE_REJECTED, async ({ tradeId }) => {
     try {
-      await tradeProcessor.rejectTrade(tradeId, socket.data.userId!);
+      const leagueId = await getTradeLeagueId(tradeId);
+      if (!leagueId) {
+        emitError(socket, 'TRADE_NOT_FOUND', 'Trade not found');
+        return;
+      }
+
+      await tradeProcessor.rejectTrade(tradeId, socket.data.userId);
 
       io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_REJECTED, {
         leagueId,
@@ -358,9 +428,15 @@ function registerTradeHandlers(socket: DraftSocket): void {
     }
   });
 
-  socket.on(SocketEvents.TRADE_CANCELLED, async ({ leagueId, tradeId }) => {
+  socket.on(SocketEvents.TRADE_CANCELLED, async ({ tradeId }) => {
     try {
-      await tradeProcessor.cancelTrade(tradeId, socket.data.userId!);
+      const leagueId = await getTradeLeagueId(tradeId);
+      if (!leagueId) {
+        emitError(socket, 'TRADE_NOT_FOUND', 'Trade not found');
+        return;
+      }
+
+      await tradeProcessor.cancelTrade(tradeId, socket.data.userId);
 
       io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_CANCELLED, {
         leagueId,
@@ -377,16 +453,13 @@ function registerTradeHandlers(socket: DraftSocket): void {
 
 // The critical path: validates, optionally pauses the draft, processes the
 // trade atomically, then re-syncs every client.
-async function handleTradeAccepted(
-  socket: DraftSocket,
-  leagueId: string,
-  tradeId: string
-): Promise<void> {
+async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promise<void> {
   const trade = await prisma.trade.findUnique({
     where: { id: tradeId },
     include: {
       receiverTeam: true,
       initiatorTeam: true,
+      league: { select: { commissionerId: true } },
     },
   });
 
@@ -395,9 +468,14 @@ async function handleTradeAccepted(
     return;
   }
 
+  const leagueId = trade.leagueId;
+
+  // Resolved against the trade's own league rather than socket.data, which is
+  // only populated for sockets that joined a draft room.
+  const isCommissioner = trade.league.commissionerId === socket.data.userId;
+
   // Only receiver can accept (or commissioner can force)
-  const canAccept =
-    trade.receiverTeam.ownerId === socket.data.userId || socket.data.isCommissioner;
+  const canAccept = trade.receiverTeam.ownerId === socket.data.userId || isCommissioner;
 
   if (!canAccept) {
     emitError(socket, 'UNAUTHORIZED', 'Only the receiving team can accept this trade');
@@ -423,7 +501,7 @@ async function handleTradeAccepted(
   }
 
   // Process the trade atomically
-  const result = await tradeProcessor.acceptTrade(tradeId, socket.data.isCommissioner);
+  const result = await tradeProcessor.acceptTrade(tradeId, isCommissioner);
 
   // Clear cached state so syncCurrentTeam reads fresh DB data
   // (the cache was populated earlier in this handler and is now stale)
@@ -486,8 +564,10 @@ async function handleTradeAccepted(
 
 function registerTeamHandlers(socket: DraftSocket): void {
   socket.on(SocketEvents.UPDATE_QUEUE, async ({ leagueId, teamId, playerIds }) => {
+    if (!requireLeague(socket, leagueId)) return;
+
     try {
-      if (!(await canManageTeam(socket, teamId))) {
+      if (!(await canManageTeam(socket, leagueId, teamId))) {
         emitError(socket, 'UNAUTHORIZED', 'You do not have permission to update this queue');
         return;
       }
@@ -500,8 +580,10 @@ function registerTeamHandlers(socket: DraftSocket): void {
   });
 
   socket.on(SocketEvents.UPDATE_TEAM, async ({ leagueId, teamId, name }) => {
+    if (!requireLeague(socket, leagueId)) return;
+
     try {
-      if (!(await canManageTeam(socket, teamId))) {
+      if (!(await canManageTeam(socket, leagueId, teamId))) {
         emitError(socket, 'UNAUTHORIZED', 'You are not authorized to update this team');
         return;
       }
@@ -530,7 +612,11 @@ function registerTeamHandlers(socket: DraftSocket): void {
 // ============================================================================
 
 io.on(SocketEvents.CONNECTION, (socket) => {
-  console.log(`Client connected: ${socket.id}`);
+  console.log(`Client connected: ${socket.id} (user ${socket.data.userId})`);
+
+  // Private room for direct notifications (e.g. trade offers outside the draft).
+  // Joined from the verified handshake identity, not on the client's say-so.
+  socket.join(`user:${socket.data.userId}`);
 
   registerRoomHandlers(socket);
   registerDraftControlHandlers(socket);

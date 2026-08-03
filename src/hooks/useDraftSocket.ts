@@ -4,8 +4,8 @@
 'use client';
 
 import { useEffect, useCallback, useMemo, useRef, useState } from 'react';
-import { io, Socket } from 'socket.io-client';
 import type { DraftStatus } from '@prisma/client';
+import { createAuthenticatedSocket, type TypedSocket } from '@/lib/socket-connection';
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
@@ -31,8 +31,6 @@ import { SocketEvents } from '@/types/socket';
 // ============================================================================
 // TYPES
 // ============================================================================
-
-type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 export interface DraftState {
   isConnected: boolean;
@@ -416,15 +414,9 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
   useEffect(() => {
     if (!leagueId || !userId) return;
 
-    const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001';
-    console.log('Connecting to socket...', socketUrl);
+    console.log('Connecting to socket...');
 
-    const socket: TypedSocket = io(socketUrl, {
-      autoConnect: true,
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-    });
+    const socket = createAuthenticatedSocket();
 
     socketRef.current = socket;
 
@@ -433,7 +425,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       console.log('Socket connected');
       setState((prev) => ({ ...prev, isConnected: true, error: null }));
 
-      socket.emit(SocketEvents.JOIN_DRAFT_ROOM, { leagueId, userId, teamId });
+      socket.emit(SocketEvents.JOIN_DRAFT_ROOM, { leagueId });
     });
 
     socket.on('disconnect', (reason) => {
@@ -643,7 +635,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
         };
       });
 
-      socketRef.current.emit(SocketEvents.PICK_MADE, { leagueId, playerId, teamId });
+      socketRef.current.emit(SocketEvents.PICK_MADE, { leagueId, playerId });
     },
     [leagueId, teamId]
   );
@@ -668,9 +660,9 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       // OPTIMISTIC: Move assets before server round-trip
       setState((prev) => applyOptimisticTradeAccept(prev, tradeId));
 
-      socketRef.current.emit(SocketEvents.TRADE_ACCEPTED, { leagueId, tradeId });
+      socketRef.current.emit(SocketEvents.TRADE_ACCEPTED, { tradeId });
     },
-    [leagueId]
+    []
   );
 
   const rejectTrade = useCallback(
@@ -680,9 +672,9 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       // OPTIMISTIC: Remove trade from list
       setState((prev) => withoutTrade(prev, tradeId));
 
-      socketRef.current.emit(SocketEvents.TRADE_REJECTED, { leagueId, tradeId });
+      socketRef.current.emit(SocketEvents.TRADE_REJECTED, { tradeId });
     },
-    [leagueId]
+    []
   );
 
   const cancelTrade = useCallback(
@@ -692,9 +684,9 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       // OPTIMISTIC: Remove trade from list
       setState((prev) => withoutTrade(prev, tradeId));
 
-      socketRef.current.emit(SocketEvents.TRADE_CANCELLED, { leagueId, tradeId });
+      socketRef.current.emit(SocketEvents.TRADE_CANCELLED, { tradeId });
     },
-    [leagueId]
+    []
   );
 
   // Commissioner actions

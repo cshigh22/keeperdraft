@@ -25,8 +25,8 @@ export function GlobalTradeNotifier() {
         initiatorAssets: activeTrade.initiatorAssets,
         receiverAssets: activeTrade.receiverAssets,
       }}
-      onAccept={() => acceptTrade(activeTrade.leagueId, activeTrade.tradeId)}
-      onReject={() => rejectTrade(activeTrade.leagueId, activeTrade.tradeId)}
+      onAccept={() => acceptTrade(activeTrade.tradeId)}
+      onReject={() => rejectTrade(activeTrade.tradeId)}
     />
   );
 }

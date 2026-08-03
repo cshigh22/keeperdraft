@@ -5,6 +5,28 @@ import { AlertCircle } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
+import { joinLeague } from '@/server/actions/league';
+
+function InviteProblem({ title, message }: { title: string; message: string }) {
+    return (
+        <div className="min-h-screen flex items-center justify-center bg-background p-4">
+            <Card className="max-w-md w-full border-destructive/50">
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-destructive">
+                        <AlertCircle className="w-6 h-6" />
+                        {title}
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <p className="text-muted-foreground">{message}</p>
+                    <Link href="/leagues" className="block">
+                        <Button className="w-full">Back to Leagues</Button>
+                    </Link>
+                </CardContent>
+            </Card>
+        </div>
+    );
+}
 
 export default async function JoinPage({ params }: { params: { token: string } }) {
     const session = await auth();
@@ -21,24 +43,10 @@ export default async function JoinPage({ params }: { params: { token: string } }
 
     if (!invite || invite.expiresAt < new Date()) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-background p-4">
-                <Card className="max-w-md w-full border-destructive/50">
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-destructive">
-                            <AlertCircle className="w-6 h-6" />
-                            Invalid Invite
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        <p className="text-muted-foreground">
-                            This invite link is invalid or has expired.
-                        </p>
-                        <Link href="/leagues" className="block">
-                            <Button className="w-full">Back to Leagues</Button>
-                        </Link>
-                    </CardContent>
-                </Card>
-            </div>
+            <InviteProblem
+                title="Invalid Invite"
+                message="This invite link is invalid or has expired."
+            />
         );
     }
 
@@ -51,7 +59,15 @@ export default async function JoinPage({ params }: { params: { token: string } }
         redirect(`/leagues/${invite.leagueId}`);
     }
 
-    // Find first empty team
+    if (invite.usedAt) {
+        return (
+            <InviteProblem
+                title="Invite Already Used"
+                message="This invite link has already been claimed. Ask the commissioner for a new one."
+            />
+        );
+    }
+
     const emptyTeam = await prisma.team.findFirst({
         where: {
             leagueId: invite.leagueId,
@@ -62,44 +78,41 @@ export default async function JoinPage({ params }: { params: { token: string } }
 
     if (!emptyTeam) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-background p-4">
-                <Card className="max-w-md w-full border-destructive/50">
-                    <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-destructive">
-                            <AlertCircle className="w-6 h-6" />
-                            League Full
-                        </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        <p className="text-muted-foreground">
-                            This league is already full. No open team slots are available.
-                        </p>
-                        <Link href="/leagues" className="block">
-                            <Button className="w-full">Back to Leagues</Button>
-                        </Link>
-                    </CardContent>
-                </Card>
-            </div>
+            <InviteProblem
+                title="League Full"
+                message="This league is already full. No open team slots are available."
+            />
         );
     }
 
-    // Join the league
-    await prisma.$transaction([
-        prisma.leagueMember.create({
-            data: {
-                userId,
-                leagueId: invite.leagueId,
-                role: 'MEMBER',
-            },
-        }),
-        prisma.team.update({
-            where: { id: emptyTeam.id },
-            data: {
-                ownerId: userId,
-                name: `${session.user.name}'s Team`,
-            },
-        }),
-    ]);
+    // Joining happens on submit, never on page load — otherwise simply loading
+    // this URL would spend the invite and add the viewer to the league.
+    const confirmJoin = joinLeague.bind(null, params.token);
 
-    redirect(`/leagues/${invite.leagueId}`);
+    return (
+        <div className="min-h-screen flex items-center justify-center bg-background p-4">
+            <Card className="max-w-md w-full">
+                <CardHeader>
+                    <CardTitle>Join {invite.league.name}</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <p className="text-muted-foreground">
+                        You&apos;ve been invited to join{' '}
+                        <span className="font-medium text-foreground">{invite.league.name}</span> for
+                        the {invite.league.season} season. You&apos;ll take over an open team slot.
+                    </p>
+                    <form action={confirmJoin}>
+                        <Button type="submit" className="w-full">
+                            Join League
+                        </Button>
+                    </form>
+                    <Link href="/leagues" className="block">
+                        <Button variant="outline" className="w-full">
+                            Cancel
+                        </Button>
+                    </Link>
+                </CardContent>
+            </Card>
+        </div>
+    );
 }

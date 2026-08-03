@@ -1,17 +1,13 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { io, Socket } from 'socket.io-client';
 import { SocketEvents } from '@/types/socket';
-import type { 
-  ServerToClientEvents, 
-  ClientToServerEvents, 
+import type {
   TradeOfferedPayload,
   TradeAcceptedPayload,
   TradeRejectedPayload
 } from '@/types/socket';
-
-type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
+import { createAuthenticatedSocket, type TypedSocket } from '@/lib/socket-connection';
 
 // Singleton socket instance to avoid multiple connections across the app
 let globalSocket: TypedSocket | null = null;
@@ -25,12 +21,7 @@ export function useGlobalSocket(userId?: string) {
     if (!userId) return;
 
     if (!globalSocket) {
-      const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001';
-      globalSocket = io(socketUrl, {
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000,
-        autoConnect: true,
-      });
+      globalSocket = createAuthenticatedSocket();
     }
 
     socketRef.current = globalSocket;
@@ -38,8 +29,8 @@ export function useGlobalSocket(userId?: string) {
     const onConnect = () => {
       setIsConnected(true);
       console.log('Global socket connected');
-      // Identify this user to join their private room
-      globalSocket?.emit(SocketEvents.AUTHENTICATE, { userId });
+      // The server puts this socket in the user's private room from the
+      // authenticated handshake — nothing to announce here.
     };
 
     const onDisconnect = () => {
@@ -92,15 +83,15 @@ export function useGlobalSocket(userId?: string) {
     };
   }, [userId]);
 
-  const acceptTrade = useCallback((leagueId: string, tradeId: string) => {
+  const acceptTrade = useCallback((tradeId: string) => {
     if (!socketRef.current) return;
-    socketRef.current.emit(SocketEvents.TRADE_ACCEPTED, { leagueId, tradeId });
+    socketRef.current.emit(SocketEvents.TRADE_ACCEPTED, { tradeId });
     setActiveTrade(null);
   }, []);
 
-  const rejectTrade = useCallback((leagueId: string, tradeId: string) => {
+  const rejectTrade = useCallback((tradeId: string) => {
     if (!socketRef.current) return;
-    socketRef.current.emit(SocketEvents.TRADE_REJECTED, { leagueId, tradeId });
+    socketRef.current.emit(SocketEvents.TRADE_REJECTED, { tradeId });
     setActiveTrade(null);
   }, []);
 
