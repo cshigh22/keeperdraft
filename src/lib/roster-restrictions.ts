@@ -31,19 +31,40 @@ function isCorePosition(position: string): position is CorePosition {
   return (CORE_POSITIONS as readonly string[]).includes(position);
 }
 
-/**
- * Determines which positions a team may NOT draft, so its remaining picks are
- * guaranteed to cover every unfilled starting slot.
- *
- * @param rosterPositions positions of players currently on the roster
- * @param slots           starting/bench slot counts from draft settings
- * @param remainingPicks  incomplete picks the team still owns
- */
-export function getRestrictedPositions(
+export function totalRosterSlots(slots: RosterSlotSettings): number {
+  return (
+    (slots.qbCount || 0) +
+    (slots.rbCount || 0) +
+    (slots.wrCount || 0) +
+    (slots.teCount || 0) +
+    (slots.flexCount || 0) +
+    (slots.superflexCount || 0) +
+    (slots.kCount || 0) +
+    (slots.defCount || 0) +
+    (slots.benchCount || 0)
+  );
+}
+
+// Shared roster/slot arithmetic behind position restrictions and trade
+// feasibility: which starting slots are still empty once every rostered
+// player (including overflow absorbed into FLEX/SUPERFLEX) is placed.
+export interface RosterCoverage {
+  // Core-position players on the roster
+  rosterCount: number;
+  // Dedicated slots still empty, per position
+  unfilled: Record<CorePosition, number>;
+  unfilledFlex: number;
+  unfilledSuperflex: number;
+  dedicatedUnfilled: number;
+  totalUnfilledStarters: number;
+  // Overflow players consuming bench spots after fungible slots absorbed them
+  benchUsed: number;
+}
+
+export function analyzeRosterCoverage(
   rosterPositions: readonly string[],
-  slots: RosterSlotSettings,
-  remainingPicks: number
-): string[] {
+  slots: RosterSlotSettings
+): RosterCoverage {
   const rosterCounts: Record<CorePosition, number> = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DEF: 0 };
   for (const raw of rosterPositions) {
     const position = normalizePosition(raw);
@@ -85,8 +106,33 @@ export function getRestrictedPositions(
   const unfilledSuperflex = fillFungibleSlots(slots.superflexCount || 0, SUPERFLEX_ELIGIBLE);
 
   const dedicatedUnfilled = CORE_POSITIONS.reduce((sum, pos) => sum + unfilled[pos], 0);
-  const totalUnfilledStarters = dedicatedUnfilled + unfilledFlex + unfilledSuperflex;
-  const benchUsed = CORE_POSITIONS.reduce((sum, pos) => sum + overflow[pos], 0);
+
+  return {
+    rosterCount: CORE_POSITIONS.reduce((sum, pos) => sum + rosterCounts[pos], 0),
+    unfilled,
+    unfilledFlex,
+    unfilledSuperflex,
+    dedicatedUnfilled,
+    totalUnfilledStarters: dedicatedUnfilled + unfilledFlex + unfilledSuperflex,
+    benchUsed: CORE_POSITIONS.reduce((sum, pos) => sum + overflow[pos], 0),
+  };
+}
+
+/**
+ * Determines which positions a team may NOT draft, so its remaining picks are
+ * guaranteed to cover every unfilled starting slot.
+ *
+ * @param rosterPositions positions of players currently on the roster
+ * @param slots           starting/bench slot counts from draft settings
+ * @param remainingPicks  incomplete picks the team still owns
+ */
+export function getRestrictedPositions(
+  rosterPositions: readonly string[],
+  slots: RosterSlotSettings,
+  remainingPicks: number
+): string[] {
+  const { unfilled, unfilledFlex, unfilledSuperflex, dedicatedUnfilled, totalUnfilledStarters, benchUsed } =
+    analyzeRosterCoverage(rosterPositions, slots);
 
   // If all starters are filled, no restrictions needed
   if (totalUnfilledStarters === 0) return [];
@@ -120,4 +166,38 @@ export function getRestrictedPositions(
   if (benchUsed < (slots.benchCount || 0)) return [];
 
   return restrictedPositions(true);
+}
+
+// How a roster stands against its league's slots given its remaining picks.
+// Used to judge whether a trade would leave a team unable to field a legal
+// lineup: starterShortfall counts required starting slots that can no longer
+// be filled; capacityOverflow counts players + picks beyond total roster room.
+export interface RosterFeasibility {
+  starterShortfall: number;
+  capacityOverflow: number;
+  // Distinct labels of the unfilled starting slots, e.g. ['WR', 'K', 'DEF', 'FLEX']
+  unfilledStarterLabels: string[];
+}
+
+export function getRosterFeasibility(
+  rosterPositions: readonly string[],
+  slots: RosterSlotSettings,
+  remainingPicks: number
+): RosterFeasibility {
+  const coverage = analyzeRosterCoverage(rosterPositions, slots);
+
+  const unfilledStarterLabels: string[] = CORE_POSITIONS.filter(
+    (pos) => coverage.unfilled[pos] > 0
+  );
+  if (coverage.unfilledFlex > 0) unfilledStarterLabels.push('FLEX');
+  if (coverage.unfilledSuperflex > 0) unfilledStarterLabels.push('SUPERFLEX');
+
+  return {
+    starterShortfall: Math.max(0, coverage.totalUnfilledStarters - remainingPicks),
+    capacityOverflow: Math.max(
+      0,
+      coverage.rosterCount + remainingPicks - totalRosterSlots(slots)
+    ),
+    unfilledStarterLabels,
+  };
 }

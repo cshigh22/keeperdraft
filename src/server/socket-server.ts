@@ -473,14 +473,18 @@ async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promis
   // Resolved against the trade's own league rather than socket.data, which is
   // only populated for sockets that joined a draft room.
   const isCommissioner = trade.league.commissionerId === socket.data.userId;
+  const isReceiver = trade.receiverTeam.ownerId === socket.data.userId;
 
   // Only receiver can accept (or commissioner can force)
-  const canAccept = trade.receiverTeam.ownerId === socket.data.userId || isCommissioner;
-
-  if (!canAccept) {
+  if (!isReceiver && !isCommissioner) {
     emitError(socket, 'UNAUTHORIZED', 'Only the receiving team can accept this trade');
     return;
   }
+
+  // A "force" is the commissioner accepting on another manager's behalf —
+  // commissioners accepting their own incoming trades get no special treatment
+  // (forced trades bypass the feasibility guard and are flagged on the record).
+  const forcedByCommissioner = isCommissioner && !isReceiver;
 
   const manager = getDraftManager(leagueId);
   const draftState = await manager.getCurrentState();
@@ -501,7 +505,7 @@ async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promis
   }
 
   // Process the trade atomically
-  const result = await tradeProcessor.acceptTrade(tradeId, isCommissioner);
+  const result = await tradeProcessor.acceptTrade(tradeId, forcedByCommissioner);
 
   // Clear cached state so syncCurrentTeam reads fresh DB data
   // (the cache was populated earlier in this handler and is now stale)

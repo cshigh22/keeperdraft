@@ -8,6 +8,7 @@ import type {
   DraftPickSummary,
   TradeOfferedPayload,
 } from '@/types/socket';
+import { getRosterFeasibility } from '@/lib/roster-restrictions';
 import { toTeamSummary, toTradeAssetPayload } from './mappers';
 
 // ============================================================================
@@ -36,6 +37,15 @@ interface TradeResult {
   initiatorAssets: TradeAssetPayload[];
   receiverAssets: TradeAssetPayload[];
   updatedPicks?: DraftPickSummary[];
+}
+
+// One side of a trade, normalized for the feasibility check
+interface TradeSideAssets {
+  teamId: string;
+  teamName: string;
+  playerIds: string[];
+  draftPickIds: string[];
+  futurePickSeasons: number[];
 }
 
 const TRADE_INCLUDE = {
@@ -147,6 +157,27 @@ export class TradeProcessor {
     await this.validateAssets(leagueId, initiatorTeamId, initiatorAssets);
     await this.validateAssets(leagueId, receiverTeamId, receiverAssets);
 
+    // Block roster-breaking trades before the offer is ever sent
+    const toSide = (
+      teamId: string,
+      teamName: string,
+      assets: AssetInput[]
+    ): TradeSideAssets => ({
+      teamId,
+      teamName,
+      playerIds: assets.filter((a) => a.assetType === 'PLAYER').map((a) => a.id),
+      draftPickIds: assets.filter((a) => a.assetType === 'DRAFT_PICK').map((a) => a.id),
+      futurePickSeasons: assets
+        .filter((a) => a.assetType === 'FUTURE_PICK')
+        .map((a) => parseFutureAssetId(a.id).season),
+    });
+
+    await this.assertTradeFeasible(
+      leagueId,
+      toSide(initiatorTeamId, initiatorTeam.name, initiatorAssets),
+      toSide(receiverTeamId, receiverTeam.name, receiverAssets)
+    );
+
     // Give every future pick a real DraftPick row now, so acceptance can
     // transfer it by id exactly like a board pick instead of guessing which
     // row matches a (season, round) pair at execution time.
@@ -239,6 +270,32 @@ export class TradeProcessor {
     await this.validateAssetsForSwap(trade.leagueId, trade.initiatorTeamId, initiatorAssets);
     await this.validateAssetsForSwap(trade.leagueId, trade.receiverTeamId, receiverAssets);
 
+    // Re-check feasibility against current state — picks and rosters may have
+    // changed since the proposal. A commissioner force skips this guard.
+    if (!forcedByCommissioner) {
+      const toSide = (
+        teamId: string,
+        teamName: string,
+        assets: TradeAsset[]
+      ): TradeSideAssets => ({
+        teamId,
+        teamName,
+        playerIds: assets.map((a) => a.playerId).filter((id): id is string => Boolean(id)),
+        // Materialized future picks carry a draftPickId too; the season lookup
+        // in assertTradeFeasible keeps them out of current-season math.
+        draftPickIds: assets.map((a) => a.draftPickId).filter((id): id is string => Boolean(id)),
+        futurePickSeasons: assets
+          .filter((a) => !a.draftPickId && a.futurePickSeason)
+          .map((a) => a.futurePickSeason!),
+      });
+
+      await this.assertTradeFeasible(
+        trade.leagueId,
+        toSide(trade.initiatorTeamId, trade.initiatorTeam.name, initiatorAssets),
+        toSide(trade.receiverTeamId, trade.receiverTeam.name, receiverAssets)
+      );
+    }
+
     // Perform atomic swap in transaction
     const updatedPicks: DraftPickSummary[] = [];
 
@@ -317,6 +374,106 @@ export class TradeProcessor {
       receiverAssets: receiverAssets.map((a) => toTradeAssetPayload(a, trade.receiverTeam.name)),
       updatedPicks: updatedPicks.length > 0 ? updatedPicks : undefined,
     };
+  }
+
+  // ===========================================================================
+  // FEASIBILITY GUARD
+  // ===========================================================================
+
+  // Rejects a trade that would leave either team worse off in its ability to
+  // field a legal lineup: unable to fill required starting slots with its
+  // remaining current-season picks, or holding more players + picks than the
+  // roster has room for. Comparing post-trade against pre-trade (rather than
+  // demanding absolute feasibility) lets already-broken rosters still make
+  // neutral or improving trades.
+  private async assertTradeFeasible(
+    leagueId: string,
+    sideA: TradeSideAssets,
+    sideB: TradeSideAssets
+  ): Promise<void> {
+    const [league, settings] = await Promise.all([
+      this.prisma.league.findUnique({ where: { id: leagueId }, select: { season: true } }),
+      this.prisma.draftSettings.findUnique({ where: { leagueId } }),
+    ]);
+
+    // Without settings there is no roster shape to validate against
+    if (!league || !settings) return;
+    const season = league.season;
+
+    const allPlayerIds = [...sideA.playerIds, ...sideB.playerIds];
+    const allPickIds = [...sideA.draftPickIds, ...sideB.draftPickIds];
+
+    const [tradedPlayers, tradedPicks, boardPickCount] = await Promise.all([
+      allPlayerIds.length
+        ? this.prisma.player.findMany({
+            where: { id: { in: allPlayerIds } },
+            select: { id: true, position: true },
+          })
+        : [],
+      allPickIds.length
+        ? this.prisma.draftPick.findMany({
+            where: { id: { in: allPickIds } },
+            select: { id: true, season: true },
+          })
+        : [],
+      this.prisma.draftPick.count({ where: { leagueId, season } }),
+    ]);
+
+    const positionById = new Map(tradedPlayers.map((p) => [p.id, p.position]));
+    const pickSeasonById = new Map(tradedPicks.map((p) => [p.id, p.season]));
+
+    // Only current-season picks affect this draft's math
+    const currentSeasonPicks = (side: TradeSideAssets): number =>
+      side.draftPickIds.filter((id) => pickSeasonById.get(id) === season).length +
+      side.futurePickSeasons.filter((s) => s === season).length;
+
+    const evaluate = async (self: TradeSideAssets, other: TradeSideAssets): Promise<void> => {
+      const rosterEntries = await this.prisma.playerRoster.findMany({
+        where: { leagueId, teamId: self.teamId, acquiredVia: { not: 'FREE_AGENT' } },
+        select: { playerId: true, player: { select: { position: true } } },
+      });
+
+      // Before the board exists every team implicitly owns a full slate
+      const remainingPicks =
+        boardPickCount > 0
+          ? await this.prisma.draftPick.count({
+              where: { leagueId, season, currentOwnerId: self.teamId, isComplete: false },
+            })
+          : settings.totalRounds;
+
+      const prePositions = rosterEntries.map((entry) => entry.player.position);
+      const pre = getRosterFeasibility(prePositions, settings, remainingPicks);
+
+      const outgoing = new Set(self.playerIds);
+      const incomingPositions = other.playerIds
+        .map((id) => positionById.get(id))
+        .filter((pos): pos is NonNullable<typeof pos> => Boolean(pos));
+      const postPositions: string[] = [
+        ...rosterEntries
+          .filter((entry) => !outgoing.has(entry.playerId))
+          .map((entry) => entry.player.position),
+        ...incomingPositions,
+      ];
+      const postRemaining = remainingPicks - currentSeasonPicks(self) + currentSeasonPicks(other);
+
+      const post = getRosterFeasibility(postPositions, settings, postRemaining);
+
+      if (post.starterShortfall > pre.starterShortfall) {
+        throw new Error(
+          `Trade blocked: ${self.teamName} would have ${postRemaining} pick${
+            postRemaining === 1 ? '' : 's'
+          } left but still needs ${post.unfilledStarterLabels.join(', ')}`
+        );
+      }
+      if (post.capacityOverflow > pre.capacityOverflow) {
+        throw new Error(
+          `Trade blocked: ${self.teamName} would end up with more players than roster spots`
+        );
+      }
+    };
+
+    await evaluate(sideA, sideB);
+    await evaluate(sideB, sideA);
   }
 
   // Ensures a future pick referenced by composite id has a concrete DraftPick
