@@ -98,6 +98,7 @@ interface UseDraftSocketReturn {
     updateQueue: (teamId: string, playerIds: string[]) => void;
     toggleQueue: (teamId: string, playerId: string) => void;
     updateTeamName: (teamId: string, name: string) => void;
+    clearError: () => void;
   };
   disconnect: () => void;
   reconnect: () => void;
@@ -937,6 +938,10 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
   );
 
   // Stable identity so consumers can safely depend on `actions` in effects/memos
+  const clearError = useCallback(() => {
+    setState((prev) => ({ ...prev, error: null }));
+  }, []);
+
   const actions = useMemo(
     () => ({
       makePick,
@@ -954,6 +959,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       updateQueue,
       toggleQueue,
       updateTeamName,
+      clearError,
     }),
     [
       makePick,
@@ -971,6 +977,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       updateQueue,
       toggleQueue,
       updateTeamName,
+      clearError,
     ]
   );
 
