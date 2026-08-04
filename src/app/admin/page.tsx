@@ -42,6 +42,7 @@ import {
   Database,
 } from 'lucide-react';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
+import { SocketErrorToast } from '@/components/draft/SocketErrorToast';
 import { updateDraftSettingsAction, getDraftSettingsAction, updatePlayerRankingsAction } from '@/app/actions/commissioner';
 
 // ============================================================================
@@ -598,6 +599,10 @@ function CommissionerDashboardContent() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Socket errors (failed start, veto, force-approve, …) surface here —
+          this page has no other error display, so show every code */}
+      <SocketErrorToast error={state.error} onDismiss={actions.clearError} />
     </div>
   );
 }
