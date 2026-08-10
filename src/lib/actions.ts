@@ -48,12 +48,23 @@ export async function getLeagueInfo(leagueId: string = 'demo-league') {
                 _count: {
                     select: {
                         teams: true,
-                        draftPicks: true,
                     },
                 },
             },
         });
-        return league;
+        if (!league) return null;
+
+        // _count can't be filtered by the league's own season, so count
+        // this season's picks separately (other seasons hold history and
+        // traded future picks).
+        const draftPickCount = await prisma.draftPick.count({
+            where: { leagueId, season: league.season },
+        });
+
+        return {
+            ...league,
+            _count: { ...league._count, draftPicks: draftPickCount },
+        };
     } catch (error) {
         console.error('Error fetching league info:', error);
         return null;

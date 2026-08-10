@@ -98,6 +98,7 @@ model League {
   trades             Trade[]
   pastWinners        PastWinner[]
   tradeBlockEntries  TradeBlockEntry[]
+  rosterHistory      RosterHistory[]
 
   @@index([commissionerId])
   @@index([season])
@@ -451,6 +452,32 @@ model PastWinner {
 
   @@unique([leagueId, season])
   @@index([leagueId])
+}
+
+// ============================================================================
+// SEASON HISTORY
+// ============================================================================
+
+// Immutable snapshot of a team's roster taken at season rollover. Fields are
+// denormalized on purpose: history must survive team renames, team deletion,
+// and Player-table churn from Sleeper reseeds.
+model RosterHistory {
+  id          String   @id @default(cuid())
+  leagueId    String
+  season      Int      // the season being archived
+  teamId      String   // plain string, no Team relation
+  teamName    String
+  playerId    String
+  playerName  String
+  position    String
+  nflTeam     String?
+  isKeeper    Boolean
+  keeperRound Int?
+  acquiredVia String
+  createdAt   DateTime @default(now())
+  league      League   @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+
+  @@index([leagueId, season])
 }
 
 // ============================================================================

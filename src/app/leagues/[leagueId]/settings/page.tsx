@@ -54,6 +54,14 @@ export default async function LeagueSettingsPage({
         redirect(`/leagues/${league.id}`);
     }
 
+    // The include can't reference league.season, so scope the board here.
+    // Other seasons' picks (history, traded future picks) don't belong in the
+    // settings editor.
+    const currentSeasonLeague = {
+        ...league,
+        draftPicks: league.draftPicks.filter((pick) => pick.season === league.season),
+    };
+
     return (
         <div className="container mx-auto py-10 px-4">
             <div className="max-w-5xl mx-auto">
@@ -64,7 +72,7 @@ export default async function LeagueSettingsPage({
                     <h1 className="text-3xl font-bold tracking-tight">League Settings</h1>
                 </div>
 
-                <LeagueSettingsForm league={league} />
+                <LeagueSettingsForm league={currentSeasonLeague} />
 
                 <div className="mt-8">
                     <DeleteLeagueCard leagueId={league.id} leagueName={league.name} />

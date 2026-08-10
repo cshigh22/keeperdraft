@@ -9,6 +9,7 @@ import type {
   PrismaClient,
 } from '@prisma/client';
 import { toPlayerSummary, toTeamSummary, toTradeAssetPayload } from './mappers';
+import { buildTradeMap, generatePickSlots } from './draft-pick-generator';
 import { getRestrictedPositions, normalizePosition } from '@/lib/roster-restrictions';
 import type { Server } from 'socket.io';
 import type {
@@ -124,7 +125,10 @@ export class DraftStateManager {
   // ===========================================================================
 
   async getCurrentState(): Promise<DraftStateCache> {
-    if (this.stateCache) {
+    // Only trust the cache mid-draft. Outside IN_PROGRESS the state can be
+    // changed by the Next.js process (e.g. season rollover resets it) with no
+    // way to invalidate this long-lived manager instance.
+    if (this.stateCache?.status === 'IN_PROGRESS') {
       return this.stateCache;
     }
 
@@ -167,6 +171,7 @@ export class DraftStateManager {
       this.prisma.draftPick.findFirst({
         where: {
           leagueId: this.leagueId,
+          season: await this.getLeagueSeason(),
           overallPickNumber: state.currentPick,
         },
       }),
@@ -288,7 +293,7 @@ export class DraftStateManager {
 
   private async getAllPicks(): Promise<DraftPickSummary[]> {
     const picks = await this.prisma.draftPick.findMany({
-      where: { leagueId: this.leagueId },
+      where: { leagueId: this.leagueId, season: await this.getLeagueSeason() },
       include: {
         currentOwner: { include: { owner: { select: { name: true } } } },
         originalOwner: true,
@@ -346,6 +351,7 @@ export class DraftStateManager {
       this.prisma.draftPick.findMany({
         where: {
           leagueId: this.leagueId,
+          season: await this.getLeagueSeason(),
           isComplete: true,
           selectedPlayerId: { not: null },
         },
@@ -516,6 +522,18 @@ export class DraftStateManager {
         throw new Error('No teams in league');
       }
 
+      // Purge non-keeper roster rows before the board opens. After a season
+      // rollover, teams that never re-submitted keepers still carry last
+      // season's roster, which would wrongly block those players from the
+      // pool. Keepers and pre-draft marketplace signals (FREE_AGENT) survive.
+      await this.prisma.playerRoster.deleteMany({
+        where: {
+          leagueId: this.leagueId,
+          isKeeper: false,
+          acquiredVia: { not: 'FREE_AGENT' },
+        },
+      });
+
       // Keeper counts can drift past maxKeepers through paths that don't
       // revalidate (lowering the limit after selections, trading keeper-flagged
       // players), which corrupts every team's pick math once the board is
@@ -545,7 +563,11 @@ export class DraftStateManager {
 
       // Find the first available pick after keepers are accounted for
       const firstPick = await this.prisma.draftPick.findFirst({
-        where: { leagueId: this.leagueId, isComplete: false },
+        where: {
+          leagueId: this.leagueId,
+          season: await this.getLeagueSeason(),
+          isComplete: false,
+        },
         orderBy: { overallPickNumber: 'asc' },
       });
 
@@ -714,6 +736,7 @@ export class DraftStateManager {
     const currentPick = await this.prisma.draftPick.findFirst({
       where: {
         leagueId: this.leagueId,
+        season: await this.getLeagueSeason(),
         overallPickNumber: state.currentPick,
         isComplete: false,
       },
@@ -742,6 +765,7 @@ export class DraftStateManager {
       this.prisma.draftPick.findFirst({
         where: {
           leagueId: this.leagueId,
+          season: await this.getLeagueSeason(),
           overallPickNumber: state.currentPick,
           isComplete: false,
         },
@@ -1052,7 +1076,7 @@ export class DraftStateManager {
     this.stopTimer();
 
     await this.prisma.$transaction(async (tx) => {
-      const currentSeason = new Date().getFullYear();
+      const currentSeason = await this.getLeagueSeason();
 
       // NOTE: future-season pick records are intentionally left untouched — they
       // may represent traded picks. Only the current season is reset.
@@ -1122,6 +1146,13 @@ export class DraftStateManager {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      // (leagueId, draftPosition) is unique — null everything first so
+      // reassignments can't collide with a position another team still holds.
+      await tx.team.updateMany({
+        where: { leagueId: this.leagueId },
+        data: { draftPosition: null },
+      });
+
       for (const [index, teamId] of teamOrder.entries()) {
         await tx.team.update({
           where: { id: teamId },
@@ -1165,33 +1196,22 @@ export class DraftStateManager {
 
     const season = await this.getLeagueSeason();
 
-    // Only this season's board is regenerated. Future-season picks (acquired
-    // or materialized by trades) belong to later drafts and must survive —
-    // deleting them would also null out TradeAsset.draftPickId references.
-    await tx.draftPick.deleteMany({
-      where: { leagueId: this.leagueId, season },
+    // Preserve traded ownership across the reorder. Only slotted rows for this
+    // season feed the map — unslotted rows are trade-materialized picks that
+    // the shared generator adopts in place.
+    const currentPicks = await tx.draftPick.findMany({
+      where: { leagueId: this.leagueId, season, pickInRound: { not: null } },
+      select: { round: true, originalOwnerId: true, currentOwnerId: true },
     });
-    const picks: Prisma.DraftPickCreateManyInput[] = [];
-    let overallPickNumber = 1;
 
-    for (let round = 1; round <= settings.totalRounds; round++) {
-      const isReversedRound = settings.draftType === 'SNAKE' && round % 2 === 0;
-      const orderForRound = isReversedRound ? [...teamOrder].reverse() : teamOrder;
-
-      orderForRound.forEach((teamId, index) => {
-        picks.push({
-          leagueId: this.leagueId,
-          season,
-          round,
-          pickInRound: index + 1,
-          overallPickNumber: overallPickNumber++,
-          originalOwnerId: teamId,
-          currentOwnerId: teamId,
-        });
-      });
-    }
-
-    await tx.draftPick.createMany({ data: picks });
+    await generatePickSlots(tx, {
+      leagueId: this.leagueId,
+      season,
+      teamOrderList: teamOrder,
+      totalRounds: settings.totalRounds,
+      draftType: settings.draftType,
+      tradeMap: buildTradeMap(currentPicks),
+    });
   }
 
   // ===========================================================================
@@ -1329,6 +1349,7 @@ export class DraftStateManager {
       this.prisma.draftPick.findFirst({
         where: {
           leagueId: this.leagueId,
+          season: await this.getLeagueSeason(),
           selectedPlayerId: playerId,
           isComplete: true,
         },
@@ -1349,17 +1370,17 @@ export class DraftStateManager {
   // League.season is the authoritative season for the live draft. Picks from
   // other seasons (e.g. future picks acquired via trade) belong to later
   // drafts and must not count toward this one's math.
-  private leagueSeasonCache: number | null = null;
-
+  //
+  // Deliberately NOT cached: manager instances live for the whole socket
+  // process (never evicted), and season rollover bumps League.season from the
+  // Next.js process, which has no way to invalidate state held here. A PK
+  // select per call is the price of always being right.
   private async getLeagueSeason(): Promise<number> {
-    if (this.leagueSeasonCache === null) {
-      const league = await this.prisma.league.findUnique({
-        where: { id: this.leagueId },
-        select: { season: true },
-      });
-      this.leagueSeasonCache = league?.season ?? new Date().getFullYear();
-    }
-    return this.leagueSeasonCache;
+    const league = await this.prisma.league.findUnique({
+      where: { id: this.leagueId },
+      select: { season: true },
+    });
+    return league?.season ?? new Date().getFullYear();
   }
 
   // Determines which positions a team may NOT draft, so remaining picks are
@@ -1409,6 +1430,7 @@ export class DraftStateManager {
     const nextPick = await this.prisma.draftPick.findFirst({
       where: {
         leagueId: this.leagueId,
+        season: await this.getLeagueSeason(),
         overallPickNumber: { gt: currentOverall },
         isComplete: false,
       },

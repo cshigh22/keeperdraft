@@ -2,6 +2,7 @@
 // "God Mode" controls for league commissioners
 
 import { prisma } from '@/lib/prisma';
+import { buildTradeMap, generatePickSlots } from '@/server/draft-pick-generator';
 import type {
   DraftActivityLog,
   DraftActivityType,
@@ -85,86 +86,8 @@ function shuffle<T>(items: readonly T[]): T[] {
   return shuffled;
 }
 
-// Team pick order for a given round, based on draft type
-function buildRoundOrder(draftType: DraftType, round: number, teamOrder: string[]): string[] {
-  switch (draftType) {
-    case 'SNAKE':
-      return round % 2 === 0 ? [...teamOrder].reverse() : teamOrder;
-    case 'LINEAR':
-      return teamOrder;
-    case 'THIRD_ROUND_REVERSAL': {
-      const cycle = Math.floor((round - 1) / 2) % 2;
-      const isReversedRound = round > 1 && (round === 2 || round === 3 || cycle === 1);
-      return isReversedRound ? [...teamOrder].reverse() : teamOrder;
-    }
-    default:
-      return teamOrder;
-  }
-}
-
-interface RegeneratePicksParams {
-  leagueId: string;
-  season: number;
-  teamOrderList: string[];
-  totalRounds: number;
-  draftType: DraftType;
-  // "round:originalOwnerId" -> currentOwnerId, for picks that were traded
-  tradeMap: Map<string, string>;
-}
-
-// Upserts every pick slot for the new order. Uses upsert (not delete+create) so
-// existing pick IDs survive — TradeAssets reference them.
-async function regenerateDraftPicks(
-  tx: Prisma.TransactionClient,
-  { leagueId, season, teamOrderList, totalRounds, draftType, tradeMap }: RegeneratePicksParams
-): Promise<number> {
-  let picksUpdated = 0;
-
-  for (let round = 1; round <= totalRounds; round++) {
-    const orderForRound = buildRoundOrder(draftType, round, teamOrderList);
-
-    for (const [index, teamId] of orderForRound.entries()) {
-      const pickInRound = index + 1;
-      const overallPickNumber = (round - 1) * teamOrderList.length + pickInRound;
-
-      // If this team's pick in this round was previously traded, the trade
-      // follows the team
-      const currentOwnerId = tradeMap.get(`${round}:${teamId}`) || teamId;
-
-      await tx.draftPick.upsert({
-        where: {
-          leagueId_season_round_pickInRound: { leagueId, season, round, pickInRound },
-        },
-        update: {
-          originalOwnerId: teamId,
-          currentOwnerId,
-          overallPickNumber,
-        },
-        create: {
-          leagueId,
-          season,
-          round,
-          pickInRound,
-          overallPickNumber,
-          originalOwnerId: teamId,
-          currentOwnerId,
-        },
-      });
-      picksUpdated++;
-    }
-  }
-
-  // Clean up any extra picks if the number of teams or rounds decreased
-  await tx.draftPick.deleteMany({
-    where: {
-      leagueId,
-      season,
-      OR: [{ round: { gt: totalRounds } }, { pickInRound: { gt: teamOrderList.length } }],
-    },
-  });
-
-  return picksUpdated;
-}
+// Pick slot generation lives in the shared module (used here, by the socket
+// server's DraftStateManager, and by season rollover).
 
 // ============================================================================
 // COMMISSIONER SERVICE
@@ -230,9 +153,11 @@ export const CommissionerService = {
 
     const result = await prisma.$transaction(async (tx) => {
       // 1. Capture current ownership state for traded picks, so trades can
-      // "follow the team" when the draft order changes
+      // "follow the team" when the draft order changes. Scoped to this
+      // season's slotted rows — unslotted rows are trade-materialized picks
+      // for FUTURE seasons and must not leak onto this board.
       const currentPicks = await tx.draftPick.findMany({
-        where: { leagueId },
+        where: { leagueId, season: league.season, pickInRound: { not: null } },
         select: {
           round: true,
           originalOwnerId: true,
@@ -240,12 +165,7 @@ export const CommissionerService = {
         },
       });
 
-      const tradeMap = new Map<string, string>();
-      for (const pick of currentPicks) {
-        if (pick.currentOwnerId !== pick.originalOwnerId) {
-          tradeMap.set(`${pick.round}:${pick.originalOwnerId}`, pick.currentOwnerId);
-        }
-      }
+      const tradeMap = buildTradeMap(currentPicks);
 
       // 2. Clear all draft positions first to avoid unique constraint violations
       // (leagueId, draftPosition) is unique, so we can't swap directly without nulling first
@@ -281,7 +201,7 @@ export const CommissionerService = {
         throw new Error('Total rounds must be at least 1');
       }
 
-      const picksGenerated = await regenerateDraftPicks(tx, {
+      const picksGenerated = await generatePickSlots(tx, {
         leagueId,
         season: league.season,
         teamOrderList,
@@ -420,6 +340,11 @@ export const CommissionerService = {
 
   // ==========================================================================
   // LIVE DRAFT CONTROLS
+  //
+  // DEAD CODE — nothing calls the methods below. The live implementations run
+  // in the socket server's DraftStateManager (src/server/draft-state-manager.ts).
+  // Several of these lack the season scoping the live twins have; do not wire
+  // them up without reconciling.
   // ==========================================================================
 
   /**

@@ -6,7 +6,7 @@ import { CommissionerService, DraftSettingsInput } from '@/services/commissioner
 import { updateRankingsFromFantasyCalc } from '@/lib/fantasycalc-api';
 import { revalidateLeague } from './league';
 
-async function requireCommissioner(leagueId: string) {
+export async function requireCommissioner(leagueId: string) {
     const session = await auth();
     if (!session?.user?.id) throw new Error('Unauthorized');
 

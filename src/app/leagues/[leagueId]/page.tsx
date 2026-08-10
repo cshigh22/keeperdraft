@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Users, Settings, Trophy, Play, ArrowLeft } from "lucide-react";
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
+import StartNewSeasonButton from "./StartNewSeasonButton";
 import { EditableTeamName } from "@/components/league/EditableTeamName";
 import { LegacyVault } from "@/components/champions/LegacyVault";
 import { Marketplace } from "@/components/marketplace/Marketplace";
@@ -300,6 +301,13 @@ export default async function LeagueDetailPage({
                             </Button>
                         </Link>
                         <InviteLinkButton leagueId={league.id} />
+                        {draftStatus === "COMPLETED" && (
+                            <StartNewSeasonButton
+                                leagueId={league.id}
+                                leagueName={league.name}
+                                currentSeason={league.season}
+                            />
+                        )}
                     </>
                 )}
             </div>

@@ -352,7 +352,7 @@ function buildOptimisticPick(
 ): DraftPickSummary {
   return {
     id: `${idPrefix}-${Date.now()}`,
-    season: new Date().getFullYear(),
+    season: prev.season || new Date().getFullYear(),
     round: prev.currentRound,
     pickInRound: 0, // Unknown until the server confirms
     overallPickNumber: prev.currentPick,
