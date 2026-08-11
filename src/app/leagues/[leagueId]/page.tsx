@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Users, Settings, Trophy, Play, ArrowLeft, History } from "lucide-react";
+import { Users, Settings, Trophy, Play, ArrowLeft, ArrowLeftRight, History } from "lucide-react";
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
 import { ProposeTradeButton } from "@/components/trade/ProposeTradeButton";
 import { CommissionerTradeButton } from "@/components/trade/CommissionerTradeButton";
@@ -367,6 +367,12 @@ export default async function LeagueDetailPage({
                     <Button variant="outline">
                         <History className="mr-2 h-4 w-4" />
                         Past Seasons
+                    </Button>
+                </Link>
+                <Link href={`/leagues/${league.id}/trades`}>
+                    <Button variant="outline">
+                        <ArrowLeftRight className="mr-2 h-4 w-4" />
+                        Trade History
                     </Button>
                 </Link>
                 {isCommissioner && (

@@ -2,8 +2,12 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Trophy, Users, ClipboardList } from "lucide-react";
+import { ArrowLeft, ArrowLeftRight, Trophy, Users, ClipboardList } from "lucide-react";
 import { ChampionCard } from "@/components/champions/ChampionCard";
+import {
+    TradeHistoryList,
+    TRADE_HISTORY_INCLUDE,
+} from "@/components/trades/TradeHistoryList";
 import {
     ArchivedRosterCard,
     DraftResultsGrid,
@@ -49,7 +53,7 @@ export default async function SeasonHistoryPage({
         notFound();
     }
 
-    const [champion, rosterRows, picks] = await Promise.all([
+    const [champion, rosterRows, picks, trades] = await Promise.all([
         prisma.pastWinner.findUnique({
             where: { leagueId_season: { leagueId: league.id, season } },
         }),
@@ -62,9 +66,17 @@ export default async function SeasonHistoryPage({
             include: { currentOwner: { select: { id: true, name: true } } },
             orderBy: [{ round: "asc" }, { pickInRound: "asc" }],
         }),
+        prisma.trade.findMany({
+            where: {
+                leagueId: league.id,
+                season,
+                status: { in: ["COMPLETED", "VETOED"] },
+            },
+            include: TRADE_HISTORY_INCLUDE,
+        }),
     ]);
 
-    if (rosterRows.length === 0 && picks.length === 0) {
+    if (rosterRows.length === 0 && picks.length === 0 && trades.length === 0) {
         notFound();
     }
 
@@ -176,12 +188,22 @@ export default async function SeasonHistoryPage({
                 )}
 
                 {rounds.length > 0 && (
-                    <section>
+                    <section className="mb-8">
                         <h2 className="text-lg font-semibold flex items-center gap-2 mb-3">
                             <ClipboardList className="h-5 w-5" />
                             Draft Results
                         </h2>
                         <DraftResultsGrid rounds={rounds} />
+                    </section>
+                )}
+
+                {trades.length > 0 && (
+                    <section>
+                        <h2 className="text-lg font-semibold flex items-center gap-2 mb-3">
+                            <ArrowLeftRight className="h-5 w-5" />
+                            Trades
+                        </h2>
+                        <TradeHistoryList trades={trades} />
                     </section>
                 )}
             </div>

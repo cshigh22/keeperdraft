@@ -237,6 +237,9 @@ model DraftPick {
 model Trade {
   id                   String       @id @default(cuid())
   leagueId             String
+  // League season the trade belongs to, stamped at creation. Nullable so rows
+  // inserted by pre-column code stay valid; the backfill migration fills them.
+  season               Int?
   initiatorTeamId      String
   receiverTeamId       String
   status               TradeStatus  @default(PENDING)

@@ -141,8 +141,12 @@ export class TradeProcessor {
       expiresAt,
     } = input;
 
-    // Validate teams exist in the league
-    const [initiatorTeam, receiverTeam] = await Promise.all([
+    // Validate teams exist in the league; league fetched for the season stamp
+    const [league, initiatorTeam, receiverTeam] = await Promise.all([
+      this.prisma.league.findUnique({
+        where: { id: leagueId },
+        select: { season: true },
+      }),
       this.prisma.team.findFirst({
         where: { id: initiatorTeamId, leagueId },
         include: { owner: { select: { name: true } } },
@@ -153,6 +157,9 @@ export class TradeProcessor {
       }),
     ]);
 
+    if (!league) {
+      throw new Error('League not found');
+    }
     if (!initiatorTeam || !receiverTeam) {
       throw new Error('Invalid teams for trade');
     }
@@ -203,6 +210,7 @@ export class TradeProcessor {
     const trade = await this.prisma.trade.create({
       data: {
         leagueId,
+        season: league.season,
         initiatorTeamId,
         receiverTeamId,
         status: 'PENDING',
