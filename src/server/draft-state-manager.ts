@@ -292,8 +292,13 @@ export class DraftStateManager {
   }
 
   private async getAllPicks(): Promise<DraftPickSummary[]> {
+    // Current season plus future seasons: the board renders only the current
+    // board, but the trade modal needs trade-materialized future picks as real
+    // rows so acquired ownership ("Acquired via ...") is shown and offerable.
+    // Past seasons are history and stay excluded. Mirrors the dashboard's
+    // pickSummaries query (season: { gte: league.season }).
     const picks = await this.prisma.draftPick.findMany({
-      where: { leagueId: this.leagueId, season: await this.getLeagueSeason() },
+      where: { leagueId: this.leagueId, season: { gte: await this.getLeagueSeason() } },
       include: {
         currentOwner: { include: { owner: { select: { name: true } } } },
         originalOwner: true,
