@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Users, Settings, Trophy, Play, ArrowLeft } from "lucide-react";
+import { Users, Settings, Trophy, Play, ArrowLeft, History } from "lucide-react";
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
 import { ProposeTradeButton } from "@/components/trade/ProposeTradeButton";
 import type { TeamSummary, PlayerSummary, DraftPickSummary } from "@/types/socket";
@@ -362,6 +362,12 @@ export default async function LeagueDetailPage({
                         </Button>
                     </Link>
                 )}
+                <Link href={`/leagues/${league.id}/history`}>
+                    <Button variant="outline">
+                        <History className="mr-2 h-4 w-4" />
+                        Past Seasons
+                    </Button>
+                </Link>
                 {isCommissioner && (
                     <>
                         <Link href={`/leagues/${league.id}/settings`}>
