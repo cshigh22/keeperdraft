@@ -15,6 +15,8 @@ let globalSocket: TypedSocket | null = null;
 export function useGlobalSocket(userId?: string) {
   const [isConnected, setIsConnected] = useState(false);
   const [activeTrade, setActiveTrade] = useState<TradeOfferedPayload | null>(null);
+  // A commissioner-executed trade involving one of this user's teams
+  const [executedTrade, setExecutedTrade] = useState<TradeAcceptedPayload | null>(null);
   const socketRef = useRef<TypedSocket | null>(null);
 
   useEffect(() => {
@@ -50,6 +52,16 @@ export function useGlobalSocket(userId?: string) {
     const onTradeAccepted = (payload: TradeAcceptedPayload) => {
         // If this trade was currently being shown, clear it
         setActiveTrade(current => current?.tradeId === payload.tradeId ? null : current);
+
+        // Commissioner-executed trades have no offer step, so this is the
+        // affected manager's first (and only) notification
+        if (
+          payload.forcedByCommissioner &&
+          (payload.initiatorTeam.ownerId === userId ||
+            payload.receiverTeam.ownerId === userId)
+        ) {
+          setExecutedTrade(payload);
+        }
     };
 
     const onTradeRejected = (payload: TradeRejectedPayload) => {
@@ -95,11 +107,15 @@ export function useGlobalSocket(userId?: string) {
     setActiveTrade(null);
   }, []);
 
+  const clearExecutedTrade = useCallback(() => setExecutedTrade(null), []);
+
   return {
     socket: socketRef.current,
     isConnected,
     activeTrade,
     setActiveTrade,
+    executedTrade,
+    clearExecutedTrade,
     acceptTrade,
     rejectTrade,
   };

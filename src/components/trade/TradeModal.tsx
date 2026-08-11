@@ -54,18 +54,30 @@ interface ProposalAsset {
 }
 
 interface TradeModalProps {
-  myTeam: TeamSummary;
+  // Required in normal mode; a commissioner composing on behalf of two other
+  // teams may have no team of their own.
+  myTeam?: TeamSummary;
   allTeams: TeamSummary[];
-  myPlayers: PlayerSummary[];
+  myPlayers?: PlayerSummary[];
   allPicks: DraftPickSummary[];
   teamRosters: Record<string, PlayerSummary[]>;
   totalRounds: number;
   // The league's draft season; picks from later seasons are future assets
   leagueSeason: number;
-  onProposeTrade: (
+  onProposeTrade?: (
     receiverTeamId: string,
     myAssets: ProposalAsset[],
     theirAssets: ProposalAsset[]
+  ) => void;
+  // Commissioner mode: both sides are freely chosen and the trade executes
+  // immediately on submit (no acceptance step).
+  commissionerMode?: boolean;
+  onCommissionerTrade?: (
+    teamAId: string,
+    teamBId: string,
+    teamAAssets: ProposalAsset[],
+    teamBAssets: ProposalAsset[],
+    notes?: string
   ) => void;
   disabled?: boolean;
 }
@@ -227,17 +239,26 @@ export function TradeModal({
   totalRounds,
   leagueSeason,
   onProposeTrade,
+  commissionerMode = false,
+  onCommissionerTrade,
   disabled = false,
 }: TradeModalProps) {
   const [open, setOpen] = useState(false);
+  const [selectedTeamAId, setSelectedTeamAId] = useState<string>('');
   const [selectedTeamId, setSelectedTeamId] = useState<string>('');
   const [selectedMyAssets, setSelectedMyAssets] = useState<Set<string>>(new Set());
   const [selectedTheirAssets, setSelectedTheirAssets] = useState<Set<string>>(new Set());
+  const [notes, setNotes] = useState('');
 
-  // Other teams (exclude my team)
+  // Side A: my team normally; freely chosen in commissioner mode
+  const sideATeam = commissionerMode
+    ? allTeams.find((t) => t.id === selectedTeamAId)
+    : myTeam;
+
+  // Side B options exclude side A
   const otherTeams = useMemo(
-    () => allTeams.filter((t) => t.id !== myTeam.id),
-    [allTeams, myTeam.id]
+    () => allTeams.filter((t) => t.id !== sideATeam?.id),
+    [allTeams, sideATeam?.id]
   );
 
   const selectedTeam = otherTeams.find((t) => t.id === selectedTeamId);
@@ -300,10 +321,15 @@ export function TradeModal({
     return assets;
   }, [allPicks, totalRounds, allTeams, leagueSeason]);
 
-  const myTradeAssets: TradeAsset[] = useMemo(
-    () => getTeamAssets(myTeam.id, myPlayers),
-    [getTeamAssets, myPlayers, myTeam.id]
-  );
+  const myTradeAssets: TradeAsset[] = useMemo(() => {
+    if (!sideATeam) return [];
+    // Commissioner mode reads side A uniformly from teamRosters; normal mode
+    // keeps the caller-supplied myPlayers slice.
+    const players = commissionerMode
+      ? teamRosters[sideATeam.id] || []
+      : myPlayers || [];
+    return getTeamAssets(sideATeam.id, players);
+  }, [getTeamAssets, myPlayers, sideATeam, commissionerMode, teamRosters]);
 
   const theirTradeAssets: TradeAsset[] = useMemo(() => {
     if (!selectedTeamId) return [];
@@ -324,23 +350,37 @@ export function TradeModal({
   }, [theirTradeAssets]);
 
   const canPropose =
-    selectedTeamId &&
+    !!sideATeam &&
+    !!selectedTeamId &&
+    sideATeam.id !== selectedTeamId &&
     (selectedMyAssets.size > 0 || selectedTheirAssets.size > 0);
 
   const resetSelections = () => {
     setSelectedMyAssets(new Set());
     setSelectedTheirAssets(new Set());
     setSelectedTeamId('');
+    setSelectedTeamAId('');
+    setNotes('');
   };
 
   const handlePropose = () => {
-    if (!canPropose) return;
+    if (!canPropose || !sideATeam) return;
 
-    onProposeTrade(
-      selectedTeamId,
-      mySelectedAssets.map(toProposalAsset),
-      theirSelectedAssets.map(toProposalAsset)
-    );
+    if (commissionerMode) {
+      onCommissionerTrade?.(
+        sideATeam.id,
+        selectedTeamId,
+        mySelectedAssets.map(toProposalAsset),
+        theirSelectedAssets.map(toProposalAsset),
+        notes.trim() || undefined
+      );
+    } else {
+      onProposeTrade?.(
+        selectedTeamId,
+        mySelectedAssets.map(toProposalAsset),
+        theirSelectedAssets.map(toProposalAsset)
+      );
+    }
 
     resetSelections();
     setOpen(false);
@@ -358,25 +398,56 @@ export function TradeModal({
       <DialogTrigger asChild>
         <Button variant="outline" disabled={disabled}>
           <ArrowLeftRight className="w-4 h-4 mr-2" />
-          Propose Trade
+          {commissionerMode ? 'Commissioner Trade' : 'Propose Trade'}
         </Button>
       </DialogTrigger>
 
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
         <DialogHeader>
-          <DialogTitle>Propose Trade</DialogTitle>
+          <DialogTitle>{commissionerMode ? 'Commissioner Trade' : 'Propose Trade'}</DialogTitle>
           <DialogDescription>
-            Select assets from both teams to include in the trade offer.
+            {commissionerMode
+              ? 'Compose a trade between any two teams. It executes immediately — no acceptance step, and roster-limit checks are bypassed.'
+              : 'Select assets from both teams to include in the trade offer.'}
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex-1 overflow-hidden">
           {/* Team Selection */}
+          {commissionerMode && (
+            <div className="mb-4">
+              <label className="text-sm font-medium mb-2 block">Team A</label>
+              <Select
+                value={selectedTeamAId}
+                onValueChange={(teamId) => {
+                  setSelectedTeamAId(teamId);
+                  if (teamId === selectedTeamId) setSelectedTeamId('');
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select the first team" />
+                </SelectTrigger>
+                <SelectContent>
+                  {allTeams.map((team) => (
+                    <SelectItem key={team.id} value={team.id}>
+                      {team.name} ({team.ownerName})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="mb-4">
-            <label className="text-sm font-medium mb-2 block">Trade Partner</label>
+            <label className="text-sm font-medium mb-2 block">
+              {commissionerMode ? 'Team B' : 'Trade Partner'}
+            </label>
             <Select value={selectedTeamId} onValueChange={setSelectedTeamId}>
               <SelectTrigger>
-                <SelectValue placeholder="Select a team to trade with" />
+                <SelectValue
+                  placeholder={
+                    commissionerMode ? 'Select the second team' : 'Select a team to trade with'
+                  }
+                />
               </SelectTrigger>
               <SelectContent>
                 {otherTeams.map((team) => (
@@ -388,15 +459,17 @@ export function TradeModal({
             </Select>
           </div>
 
-          {selectedTeamId && (
+          {selectedTeamId && sideATeam && (
             <>
               {/* Two Column Layout */}
               <div className="grid grid-cols-2 gap-4 mb-4">
-                {/* My Team */}
+                {/* Side A */}
                 <div className="border rounded-lg overflow-hidden">
                   <div className="bg-primary/10 px-4 py-2 border-b">
-                    <h3 className="font-semibold">{myTeam.name}</h3>
-                    <p className="text-xs text-muted-foreground">Your assets</p>
+                    <h3 className="font-semibold">{sideATeam.name}</h3>
+                    <p className="text-xs text-muted-foreground">
+                      {commissionerMode ? `${sideATeam.ownerName}'s assets` : 'Your assets'}
+                    </p>
                   </div>
                   <ScrollArea className="h-64">
                     <div className="p-3 space-y-2">
@@ -461,11 +534,27 @@ export function TradeModal({
 
               {/* Trade Summary */}
               <TradeSummary
-                myTeamName={myTeam.name}
+                myTeamName={sideATeam.name}
                 theirTeamName={selectedTeam?.name || ''}
                 myAssets={mySelectedAssets}
                 theirAssets={theirSelectedAssets}
               />
+
+              {commissionerMode && (
+                <div className="mt-4">
+                  <label className="text-sm font-medium mb-2 block" htmlFor="commissioner-notes">
+                    Notes <span className="text-muted-foreground">(optional, saved on the trade record)</span>
+                  </label>
+                  <input
+                    id="commissioner-notes"
+                    className="w-full rounded-md border bg-transparent px-3 py-2 text-sm"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="e.g. Executed per league group-chat agreement"
+                    maxLength={300}
+                  />
+                </div>
+              )}
             </>
           )}
         </div>
@@ -475,7 +564,7 @@ export function TradeModal({
             Cancel
           </Button>
           <Button onClick={handlePropose} disabled={!canPropose}>
-            Send Trade Offer
+            {commissionerMode ? 'Execute Trade' : 'Send Trade Offer'}
           </Button>
         </DialogFooter>
       </DialogContent>

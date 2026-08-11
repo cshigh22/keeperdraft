@@ -38,6 +38,7 @@ export const SocketEvents = {
   TRADE_CANCELLED: 'trade_cancelled',
   TRADE_PROCESSING: 'trade_processing',
   TRADE_COMPLETED: 'trade_completed',
+  COMMISSIONER_TRADE: 'commissioner_trade',
 
   // Order/Settings events
   ORDER_UPDATED: 'order_updated',
@@ -226,6 +227,8 @@ export interface TradeAcceptedPayload {
   // If trade occurred while on the clock
   draftPaused: boolean;
   pauseReason?: string;
+  // True when the commissioner executed this trade on the teams' behalf
+  forcedByCommissioner?: boolean;
   timestamp: string;
 }
 
@@ -327,6 +330,16 @@ export interface ClientToServerEvents {
     receiverTeamId: string;
     initiatorAssets: { assetType: string; id: string }[];
     receiverAssets: { assetType: string; id: string }[];
+  }) => void;
+  // Commissioner composes a trade between any two teams; it executes
+  // immediately (no acceptance step). Commissioner-only, verified server-side.
+  [SocketEvents.COMMISSIONER_TRADE]: (payload: {
+    leagueId: string;
+    teamAId: string;
+    teamBId: string;
+    teamAAssets: { assetType: string; id: string }[];
+    teamBAssets: { assetType: string; id: string }[];
+    notes?: string;
   }) => void;
   // The league is read off the trade record server-side
   [SocketEvents.TRADE_ACCEPTED]: (payload: { tradeId: string }) => void;

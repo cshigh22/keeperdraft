@@ -128,7 +128,10 @@ export class TradeProcessor {
   // CREATE TRADE
   // ===========================================================================
 
-  async createTrade(input: CreateTradeInput): Promise<TradeOfferedPayload> {
+  async createTrade(
+    input: CreateTradeInput,
+    opts?: { skipFeasibility?: boolean }
+  ): Promise<TradeOfferedPayload> {
     const {
       leagueId,
       initiatorTeamId,
@@ -172,11 +175,15 @@ export class TradeProcessor {
         .map((a) => parseFutureAssetId(a.id).season),
     });
 
-    await this.assertTradeFeasible(
-      leagueId,
-      toSide(initiatorTeamId, initiatorTeam.name, initiatorAssets),
-      toSide(receiverTeamId, receiverTeam.name, receiverAssets)
-    );
+    // Commissioner-executed trades may override the roster guard; ownership
+    // validation above is never skipped.
+    if (!opts?.skipFeasibility) {
+      await this.assertTradeFeasible(
+        leagueId,
+        toSide(initiatorTeamId, initiatorTeam.name, initiatorAssets),
+        toSide(receiverTeamId, receiverTeam.name, receiverAssets)
+      );
+    }
 
     // Give every future pick a real DraftPick row now, so acceptance can
     // transfer it by id exactly like a board pick instead of guessing which
@@ -617,38 +624,31 @@ export class TradeProcessor {
   }
 
   // ===========================================================================
-  // COMMISSIONER FORCE TRADE
+  // COMMISSIONER TRADE
   // ===========================================================================
 
-  async forceTrade(
-    tradeId: string,
+  // Creates a trade composed by the commissioner on behalf of two teams.
+  // Ownership is validated; the roster-feasibility guard is skipped (the
+  // commissioner may need to fix rosters the guard would block). The caller
+  // is responsible for force-accepting the returned trade so pause/broadcast
+  // ordering stays with the socket layer.
+  async createCommissionerTrade(
+    input: CreateTradeInput,
     commissionerUserId: string,
     notes?: string
-  ): Promise<TradeResult> {
-    const trade = await this.prisma.trade.findUnique({
-      where: { id: tradeId },
-    });
+  ): Promise<TradeOfferedPayload> {
+    await this.requireCommissioner(input.leagueId, commissionerUserId, 'execute');
 
-    if (!trade) {
-      throw new Error('Trade not found');
-    }
-
-    const league = await this.prisma.league.findUnique({
-      where: { id: trade.leagueId },
-    });
-
-    if (league?.commissionerId !== commissionerUserId) {
-      throw new Error('Only the commissioner can force trades');
-    }
+    const offered = await this.createTrade(input, { skipFeasibility: true });
 
     if (notes) {
       await this.prisma.trade.update({
-        where: { id: tradeId },
+        where: { id: offered.tradeId },
         data: { commissionerNotes: notes },
       });
     }
 
-    return this.acceptTrade(tradeId, true);
+    return offered;
   }
 
   // ===========================================================================

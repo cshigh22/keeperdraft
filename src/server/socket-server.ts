@@ -406,6 +406,78 @@ function registerTradeHandlers(socket: DraftSocket): void {
     }
   });
 
+  // Commissioner composes a trade between any two teams; it executes
+  // immediately with no acceptance step. Commissioner identity is verified
+  // against the DB inside createCommissionerTrade, not socket.data (which is
+  // only populated with isCommissioner after a draft-room join).
+  socket.on(SocketEvents.COMMISSIONER_TRADE, async (payload) => {
+    const { leagueId, teamAId, teamBId, teamAAssets, teamBAssets, notes } = payload;
+
+    if (!requireLeague(socket, leagueId)) return;
+
+    if (teamAId === teamBId) {
+      emitError(socket, 'INVALID_TRADE', 'A trade needs two different teams');
+      return;
+    }
+    if (teamAAssets.length === 0 && teamBAssets.length === 0) {
+      emitError(socket, 'INVALID_TRADE', 'Select at least one player or pick to trade');
+      return;
+    }
+
+    let tradeId: string | null = null;
+    try {
+      const offered = await tradeProcessor.createCommissionerTrade(
+        {
+          leagueId,
+          initiatorTeamId: teamAId,
+          receiverTeamId: teamBId,
+          initiatorAssets: teamAAssets,
+          receiverAssets: teamBAssets,
+        },
+        socket.data.userId,
+        notes
+      );
+      tradeId = offered.tradeId;
+      // Deliberately no TRADE_OFFERED emit — there is no pending offer to show.
+
+      const payload = await finalizeTradeExecution(
+        leagueId,
+        offered.tradeId,
+        true,
+        socket.data.userId,
+        { activityType: 'TRADE_FORCED' }
+      );
+
+      // Both affected managers hear about it even outside the draft room
+      for (const team of [payload.initiatorTeam, payload.receiverTeam]) {
+        if (team.ownerId) {
+          io.to(`user:${team.ownerId}`).emit(SocketEvents.TRADE_ACCEPTED, payload);
+        }
+      }
+    } catch (error) {
+      // If acceptance failed after the row was created, cancel it so it never
+      // lingers as a pending offer in state syncs.
+      if (tradeId) {
+        await prisma.trade
+          .updateMany({
+            where: { id: tradeId, status: 'PENDING' },
+            data: {
+              status: 'CANCELLED',
+              respondedAt: new Date(),
+              commissionerNotes: 'Commissioner trade failed during execution',
+            },
+          })
+          .catch(() => {});
+      }
+      console.error('Error executing commissioner trade:', error);
+      emitError(
+        socket,
+        'COMMISSIONER_TRADE_FAILED',
+        errorMessage(error, 'Failed to execute trade')
+      );
+    }
+  });
+
   socket.on(SocketEvents.TRADE_REJECTED, async ({ tradeId }) => {
     try {
       const leagueId = await getTradeLeagueId(tradeId);
@@ -486,6 +558,24 @@ async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promis
   // (forced trades bypass the feasibility guard and are flagged on the record).
   const forcedByCommissioner = isCommissioner && !isReceiver;
 
+  await finalizeTradeExecution(leagueId, tradeId, forcedByCommissioner, socket.data.userId, {
+    activityType: 'TRADE_ACCEPTED',
+  });
+
+  console.log(`Trade ${tradeId} accepted and processed`);
+}
+
+// Shared execution tail for accepted and commissioner-executed trades:
+// pause-before-transfer ordering (so the timer can't fire a pick mid-trade),
+// atomic swap, state re-sync, broadcast, and activity log. Returns the payload
+// so callers can emit it to additional rooms.
+async function finalizeTradeExecution(
+  leagueId: string,
+  tradeId: string,
+  forcedByCommissioner: boolean,
+  triggeredByUserId: string,
+  log: { activityType: 'TRADE_ACCEPTED' | 'TRADE_FORCED' }
+): Promise<TradeAcceptedPayload> {
   const manager = getDraftManager(leagueId);
   const draftState = await manager.getCurrentState();
 
@@ -534,6 +624,7 @@ async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promis
     },
     draftPaused: shouldPause,
     pauseReason: shouldPause ? 'Trade completed - draft paused for review' : undefined,
+    forcedByCommissioner: forcedByCommissioner || undefined,
     timestamp: new Date().toISOString(),
   };
 
@@ -544,13 +635,18 @@ async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promis
   const fullState = await manager.getFullState();
   io.to(getRoomName(leagueId)).emit(SocketEvents.STATE_SYNC, fullState);
 
+  const description =
+    log.activityType === 'TRADE_FORCED'
+      ? `Commissioner executed a trade between ${result.initiatorTeam.name} and ${result.receiverTeam.name}`
+      : `Trade accepted between ${result.initiatorTeam.name} and ${result.receiverTeam.name}`;
+
   await prisma.draftActivityLog.create({
     data: {
       leagueId,
-      activityType: 'TRADE_ACCEPTED',
-      description: `Trade accepted between ${result.initiatorTeam.name} and ${result.receiverTeam.name}`,
+      activityType: log.activityType,
+      description,
       tradeId,
-      triggeredById: socket.data.userId,
+      triggeredById: triggeredByUserId,
       metadata: {
         initiatorAssets: result.initiatorAssets,
         receiverAssets: result.receiverAssets,
@@ -559,7 +655,7 @@ async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promis
     },
   });
 
-  console.log(`Trade ${tradeId} accepted and processed`);
+  return acceptedPayload;
 }
 
 // ============================================================================

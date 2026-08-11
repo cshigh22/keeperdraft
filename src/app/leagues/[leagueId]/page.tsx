@@ -10,6 +10,7 @@ import { Separator } from "@/components/ui/separator";
 import { Users, Settings, Trophy, Play, ArrowLeft, History } from "lucide-react";
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
 import { ProposeTradeButton } from "@/components/trade/ProposeTradeButton";
+import { CommissionerTradeButton } from "@/components/trade/CommissionerTradeButton";
 import type { TeamSummary, PlayerSummary, DraftPickSummary } from "@/types/socket";
 import StartNewSeasonButton from "./StartNewSeasonButton";
 import { EditableTeamName } from "@/components/league/EditableTeamName";
@@ -370,6 +371,14 @@ export default async function LeagueDetailPage({
                 </Link>
                 {isCommissioner && (
                     <>
+                        <CommissionerTradeButton
+                            leagueId={league.id}
+                            allTeams={teamSummaries}
+                            allPicks={pickSummaries}
+                            teamRosters={socketRosters}
+                            totalRounds={totalRounds}
+                            leagueSeason={league.season}
+                        />
                         <Link href={`/leagues/${league.id}/settings`}>
                             <Button variant="outline">
                                 <Settings className="mr-2 h-4 w-4" />
