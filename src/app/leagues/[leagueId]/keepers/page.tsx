@@ -1,11 +1,11 @@
 
-import { PrismaClient } from '@prisma/client';
+import { auth } from '@/auth';
+import { prisma } from '@/lib/prisma';
+import { redirect, notFound } from 'next/navigation';
 import { KeeperSelectionUI } from '@/components/keepers/KeeperSelection';
 import { saveKeepers } from '@/app/actions/keepers';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
-
-const prisma = new PrismaClient();
 
 export default async function KeepersPage({
     params,
@@ -16,6 +16,28 @@ export default async function KeepersPage({
 }) {
     const { leagueId } = params;
 
+    const session = await auth();
+    if (!session?.user?.id) {
+        redirect('/login');
+    }
+    const userId = session.user.id;
+
+    const league = await prisma.league.findUnique({
+        where: { id: leagueId },
+        select: {
+            commissionerId: true,
+            members: { where: { userId }, select: { id: true } },
+        },
+    });
+    if (!league) {
+        notFound();
+    }
+
+    const isCommissioner = league.commissionerId === userId;
+    if (!isCommissioner && league.members.length === 0) {
+        notFound();
+    }
+
     // Get league settings
     const settings = await prisma.draftSettings.findUnique({
         where: { leagueId },
@@ -25,25 +47,40 @@ export default async function KeepersPage({
         return <div>Draft settings not configured for this league.</div>;
     }
 
-    // Find the team
-    let team;
+    // Resolve the team: an explicit teamId is honored for its owner or the
+    // commissioner; everyone else gets bounced to their own team.
+    let team = null;
     if (searchParams.teamId) {
-        team = await prisma.team.findUnique({
+        const requested = await prisma.team.findUnique({
             where: { id: searchParams.teamId },
-            include: { owner: true }
+            include: { owner: true },
         });
+        if (requested && requested.leagueId === leagueId) {
+            if (isCommissioner || requested.ownerId === userId) {
+                team = requested;
+            } else {
+                redirect(`/leagues/${leagueId}/keepers`);
+            }
+        }
     }
 
-    // Fallback if no teamId provided or not found
     if (!team) {
         team = await prisma.team.findFirst({
+            where: { leagueId, ownerId: userId },
+            include: { owner: true },
+        });
+    }
+
+    // A commissioner without their own team still needs a starting point
+    if (!team && isCommissioner) {
+        team = await prisma.team.findFirst({
             where: { leagueId },
-            include: { owner: true }
+            include: { owner: true },
         });
     }
 
     if (!team) {
-        return <div>No team found for this league.</div>;
+        return <div>You don&apos;t have a team in this league.</div>;
     }
 
     // Fetch ALL active players (the full player pool)
