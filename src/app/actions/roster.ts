@@ -56,6 +56,17 @@ export async function addPlayerToTeamRoster(formData: FormData) {
     throw new Error('Only the commissioner can manually add players to rosters');
   }
 
+  // The commissioner check above only covers leagueId; the team must belong
+  // to that same league or this becomes a cross-league write.
+  const team = await prisma.team.findFirst({
+    where: { id: teamId, leagueId },
+    select: { id: true },
+  });
+
+  if (!team) {
+    throw new Error('Team not found in this league');
+  }
+
   // Check if player is already on another roster in this league
   const existing = await prisma.playerRoster.findFirst({
     where: { leagueId, playerId },
@@ -102,9 +113,15 @@ export async function removePlayerFromRoster(formData: FormData) {
     throw new Error('Unauthorized');
   }
 
-  await prisma.playerRoster.delete({
-    where: { id: rosterEntryId },
+  // Scoped to the league the caller was authorized for; a foreign league's
+  // entry reads the same as a nonexistent one.
+  const { count } = await prisma.playerRoster.deleteMany({
+    where: { id: rosterEntryId, leagueId },
   });
+
+  if (count === 0) {
+    throw new Error('Roster entry not found');
+  }
 
   revalidatePath(`/leagues/${leagueId}`);
   return { success: true };

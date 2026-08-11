@@ -1,7 +1,5 @@
 
-import { PrismaClient, AcquisitionType } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { prisma } from '@/lib/prisma';
 
 export type KeeperSelection = {
     playerId: string;
