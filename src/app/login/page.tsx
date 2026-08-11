@@ -1,5 +1,7 @@
 import { prisma } from '@/lib/prisma';
+import { devLoginEnabled } from '@/auth';
 import { AuthCanvas } from './_components/AuthCanvas';
+import { DevLoginPanel } from './_components/DevLoginPanel';
 import { AuthHeadline } from './_components/AuthHeadline';
 import { FeatureStrip } from './_components/FeatureStrip';
 import { InviteSummary } from './_components/InviteSummary';
@@ -59,6 +61,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             <AuthHeadline mode={mode} />
             {summary && <InviteSummary summary={summary} />}
             <SignInCard mode={mode} callbackUrl={callbackUrl} error={searchParams.error} />
+            {devLoginEnabled && <DevLoginPanel callbackUrl={callbackUrl} />}
             {mode === 'signin' && <FeatureStrip />}
         </AuthCanvas>
     );
