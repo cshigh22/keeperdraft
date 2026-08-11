@@ -258,7 +258,6 @@ export default async function LeagueDetailPage({
     }));
 
     const totalRounds = league.draftSettings?.totalRounds ?? 14;
-    const totalPlayers = league.maxTeams * totalRounds;
 
     // Draft room entry button per status (none for CANCELLED)
     const draftAction =
@@ -343,18 +342,6 @@ export default async function LeagueDetailPage({
                         </Button>
                     </Link>
                 )}
-                {myTeamSummary && (
-                    <ProposeTradeButton
-                        leagueId={league.id}
-                        myTeam={myTeamSummary}
-                        allTeams={teamSummaries}
-                        myPlayers={socketRosters[myTeamSummary.id] || []}
-                        allPicks={pickSummaries}
-                        teamRosters={socketRosters}
-                        totalRounds={totalRounds}
-                        leagueSeason={league.season}
-                    />
-                )}
                 {(myTeamId || isCommissioner) && (
                     <Link href={`/leagues/${league.id}/keepers`}>
                         <Button variant="outline">
@@ -412,8 +399,20 @@ export default async function LeagueDetailPage({
                 myPlayers={myPlayers}
                 leagueRosters={allLeagueRosters}
                 isCommissioner={isCommissioner}
-                totalRounds={totalRounds}
-                totalPlayers={totalPlayers}
+                headerAction={
+                    myTeamSummary ? (
+                        <ProposeTradeButton
+                            leagueId={league.id}
+                            myTeam={myTeamSummary}
+                            allTeams={teamSummaries}
+                            myPlayers={socketRosters[myTeamSummary.id] || []}
+                            allPicks={pickSummaries}
+                            teamRosters={socketRosters}
+                            totalRounds={totalRounds}
+                            leagueSeason={league.season}
+                        />
+                    ) : undefined
+                }
             />
 
             <div className="mt-8 grid gap-6 md:grid-cols-2">

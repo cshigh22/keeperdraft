@@ -1,10 +1,8 @@
 'use client';
 
-import React from 'react';
 import { cn } from '@/lib/utils';
 import { formatRank } from '@/lib/rank';
 import { Badge } from '@/components/ui/badge';
-import { calculateROI } from '@/types/marketplace';
 import type { TradeBlockPlayerData } from '@/types/marketplace';
 
 // ============================================================================
@@ -13,8 +11,6 @@ import type { TradeBlockPlayerData } from '@/types/marketplace';
 
 interface TradeBlockCardProps {
   entry: TradeBlockPlayerData;
-  totalRounds?: number;
-  totalPlayers?: number;
 }
 
 const positionColors: Record<string, string> = {
@@ -26,34 +22,9 @@ const positionColors: Record<string, string> = {
   DEF: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/20',
 };
 
-const roiColors = {
-  green: {
-    bar: 'bg-gradient-to-r from-emerald-500 to-green-400',
-    text: 'text-emerald-500',
-    bg: 'bg-emerald-500/10',
-  },
-  yellow: {
-    bar: 'bg-gradient-to-r from-amber-500 to-yellow-400',
-    text: 'text-amber-500',
-    bg: 'bg-amber-500/10',
-  },
-  red: {
-    bar: 'bg-gradient-to-r from-red-500 to-rose-400',
-    text: 'text-red-500',
-    bg: 'bg-red-500/10',
-  },
-};
-
-export function TradeBlockCard({
-  entry,
-  totalRounds = 14,
-  totalPlayers = 168,
-}: TradeBlockCardProps) {
+export function TradeBlockCard({ entry }: TradeBlockCardProps) {
   const { player, team } = entry;
   if (!player) return null;
-
-  const roi = calculateROI(entry.draftCost, player.rank, totalRounds, totalPlayers);
-  const roiStyle = roiColors[roi.color];
 
   return (
     <div
@@ -85,27 +56,6 @@ export function TradeBlockCard({
               {player.nflTeam || 'Free Agent'} · Rank #{formatRank(player.rank)}
             </p>
           </div>
-        </div>
-
-        {/* ROI Meter */}
-        <div className="mb-3">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              Keeper Value ROI
-            </span>
-            <span className={cn('text-[10px] font-bold', roiStyle.text)}>
-              {roi.description}
-            </span>
-          </div>
-          <div className="h-1.5 rounded-full bg-muted/50 overflow-hidden">
-            <div
-              className={cn('h-full rounded-full roi-bar-fill', roiStyle.bar)}
-              style={{ '--roi-width': `${roi.percentage}%` } as React.CSSProperties}
-            />
-          </div>
-          <p className={cn('text-[10px] mt-1 font-medium', roiStyle.text)}>
-            {roi.label}
-          </p>
         </div>
 
         {/* Team + Asking Price */}

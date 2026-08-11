@@ -48,8 +48,8 @@ interface MarketplaceProps {
   myPlayers: MyPlayer[];
   leagueRosters: GeneralRosterPlayer[];
   isCommissioner: boolean;
-  totalRounds?: number;
-  totalPlayers?: number;
+  // Rendered at the right end of the section header (e.g. Propose Trade)
+  headerAction?: React.ReactNode;
 }
 
 const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DEF'] as const;
@@ -104,8 +104,7 @@ export function Marketplace({
   myPlayers,
   leagueRosters,
   isCommissioner,
-  totalRounds = 14,
-  totalPlayers = 168,
+  headerAction,
 }: MarketplaceProps) {
   const [positionFilter, setPositionFilter] = useState<string>('ALL');
   const [rosterSearch, setRosterSearch] = useState('');
@@ -269,6 +268,7 @@ export function Marketplace({
             Marketplace and manager intents
           </p>
         </div>
+        {headerAction && <div className="ml-auto">{headerAction}</div>}
       </div>
 
       {/* Main Tabs */}
@@ -311,8 +311,6 @@ export function Marketplace({
                 <TradeBlockCard
                   key={entry.teamId + '-' + entry.playerId}
                   entry={entry}
-                  totalRounds={totalRounds}
-                  totalPlayers={totalPlayers}
                 />
               ))}
             </div>
