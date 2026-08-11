@@ -739,61 +739,11 @@ export const CommissionerService = {
     );
   },
 
-  /**
-   * Reset the draft (delete all picks, reset state)
-   */
-  async resetDraft(leagueId: string): Promise<void> {
-    await prisma.$transaction(async (tx) => {
-      // Delete all player rosters (except keepers)
-      await tx.playerRoster.deleteMany({
-        where: {
-          leagueId,
-          isKeeper: false,
-        },
-      });
-
-      // Reset all picks AND return traded picks to original owners.
-      // Raw query because Prisma updateMany can't set column = another column.
-      await tx.$executeRawUnsafe(
-        `UPDATE "DraftPick" SET "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false, "currentOwnerId" = "originalOwnerId" WHERE "leagueId" = $1`,
-        leagueId
-      );
-
-      // Reset draft state
-      await tx.draftState.update({
-        where: { leagueId },
-        data: {
-          status: 'NOT_STARTED',
-          currentRound: 1,
-          currentPick: 1,
-          currentTeamId: null,
-          isPaused: false,
-          pauseReason: null,
-          timerStartedAt: null,
-          timerSecondsRemaining: null,
-          lastPickId: null,
-          undoAvailable: false,
-          startedAt: null,
-          completedAt: null,
-        },
-      });
-
-      // Cancel all pending trades
-      await tx.trade.updateMany({
-        where: {
-          leagueId,
-          status: 'PENDING',
-        },
-        data: {
-          status: 'CANCELLED',
-          respondedAt: new Date(),
-          commissionerNotes: 'Cancelled due to draft reset',
-        },
-      });
-    });
-
-    await logActivity(leagueId, 'SETTINGS_CHANGED', 'Draft reset by commissioner');
-  },
+  // NOTE: resetDraft was removed from this service. The live implementation is
+  // DraftStateManager.resetDraft on the socket server, which is season-scoped
+  // (only the current League.season board is cleared; future-season picks,
+  // including traded ones, are preserved). The copy that lived here had no
+  // season filter and would have wiped every season if ever wired up.
 };
 
 export default CommissionerService;
