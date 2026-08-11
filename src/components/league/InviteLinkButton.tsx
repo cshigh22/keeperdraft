@@ -3,16 +3,26 @@
 import React, { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Link, Copy, Check, ExternalLink } from 'lucide-react';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+    DialogTrigger,
+} from '@/components/ui/dialog';
+import { Link, Copy, Check, ExternalLink, UserPlus } from 'lucide-react';
 import { generateInvite } from '@/server/actions/league';
 
-interface InviteLinkButtonProps {
+interface InviteLinkProps {
     leagueId: string;
 }
 
-export function InviteLinkButton({ leagueId }: InviteLinkButtonProps) {
+/**
+ * The generate/copy invite-link flow. Renders dialog header + content,
+ * so it must be placed inside a <DialogContent>.
+ */
+export function InviteLinkPanel({ leagueId }: InviteLinkProps) {
     const [inviteToken, setInviteToken] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [copied, setCopied] = useState(false);
@@ -41,58 +51,73 @@ export function InviteLinkButton({ leagueId }: InviteLinkButtonProps) {
     };
 
     return (
-        <Card className="w-full">
-            <CardHeader className="pb-3">
-                <CardTitle className="text-lg flex items-center gap-2">
+        <>
+            <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
                     <Link className="w-5 h-5" />
                     Invite Members
-                </CardTitle>
-                <CardDescription>
+                </DialogTitle>
+                <DialogDescription>
                     Generate a link to invite someone to your league. Each link works once,
                     so generate a new one for each person.
-                </CardDescription>
-            </CardHeader>
-            <CardContent>
-                {!inviteToken ? (
+                </DialogDescription>
+            </DialogHeader>
+            {!inviteToken ? (
+                <Button
+                    onClick={handleGenerate}
+                    disabled={isLoading}
+                    className="w-full"
+                >
+                    {isLoading ? 'Generating...' : 'Generate Invite Link'}
+                </Button>
+            ) : (
+                <div className="space-y-3">
+                    <div className="flex gap-2">
+                        <Input
+                            readOnly
+                            value={inviteUrl}
+                            className="bg-muted font-mono text-xs"
+                        />
+                        <Button
+                            variant="outline"
+                            size="icon"
+                            onClick={handleCopy}
+                            className="shrink-0"
+                        >
+                            {copied ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                        </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                        <ExternalLink className="w-3 h-3" />
+                        Single use — expires in 7 days
+                    </p>
                     <Button
+                        variant="outline"
                         onClick={handleGenerate}
                         disabled={isLoading}
                         className="w-full"
                     >
-                        {isLoading ? 'Generating...' : 'Generate Invite Link'}
+                        {isLoading ? 'Generating...' : 'Generate Another Link'}
                     </Button>
-                ) : (
-                    <div className="space-y-3">
-                        <div className="flex gap-2">
-                            <Input
-                                readOnly
-                                value={inviteUrl}
-                                className="bg-muted font-mono text-xs"
-                            />
-                            <Button
-                                variant="outline"
-                                size="icon"
-                                onClick={handleCopy}
-                                className="shrink-0"
-                            >
-                                {copied ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
-                            </Button>
-                        </div>
-                        <p className="text-xs text-muted-foreground flex items-center gap-1">
-                            <ExternalLink className="w-3 h-3" />
-                            Single use — expires in 7 days
-                        </p>
-                        <Button
-                            variant="outline"
-                            onClick={handleGenerate}
-                            disabled={isLoading}
-                            className="w-full"
-                        >
-                            {isLoading ? 'Generating...' : 'Generate Another Link'}
-                        </Button>
-                    </div>
-                )}
-            </CardContent>
-        </Card>
+                </div>
+            )}
+        </>
+    );
+}
+
+/** Compact trigger button that opens the invite flow in a dialog. */
+export function InviteLinkButton({ leagueId }: InviteLinkProps) {
+    return (
+        <Dialog>
+            <DialogTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-1.5">
+                    <UserPlus className="w-4 h-4" />
+                    Invite Members
+                </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-md">
+                <InviteLinkPanel leagueId={leagueId} />
+            </DialogContent>
+        </Dialog>
     );
 }

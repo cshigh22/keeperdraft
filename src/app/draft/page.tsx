@@ -25,7 +25,7 @@ import { SocketErrorToast, FATAL_ERROR_CODES } from '@/components/draft/SocketEr
 import { useDraftSocket } from '@/hooks/useDraftSocket';
 import { useSession, signOut } from 'next-auth/react';
 import { getMyTeam } from '@/lib/actions';
-import { InviteLinkButton } from '@/components/league/InviteLinkButton';
+import { InviteLinkPanel } from '@/components/league/InviteLinkButton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Wifi,
@@ -322,7 +322,7 @@ function DraftRoomContent() {
                       </Button>
                     </DialogTrigger>
                     <DialogContent className="sm:max-w-md">
-                      <InviteLinkButton leagueId={leagueId} />
+                      <InviteLinkPanel leagueId={leagueId} />
                     </DialogContent>
                   </Dialog>
                 </>

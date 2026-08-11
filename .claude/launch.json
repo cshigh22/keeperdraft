@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
       "port": 3000
+    },
+    {
+      "name": "socket-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "socket"],
+      "port": 3001
     }
   ]
 }

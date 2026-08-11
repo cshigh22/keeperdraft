@@ -9,6 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Users, Settings, Trophy, Play, ArrowLeft } from "lucide-react";
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
+import { ProposeTradeButton } from "@/components/trade/ProposeTradeButton";
+import type { TeamSummary, PlayerSummary, DraftPickSummary } from "@/types/socket";
 import StartNewSeasonButton from "./StartNewSeasonButton";
 import { EditableTeamName } from "@/components/league/EditableTeamName";
 import { LegacyVault } from "@/components/champions/LegacyVault";
@@ -48,6 +50,7 @@ export default async function LeagueDetailPage({
                             player: {
                                 select: {
                                     id: true,
+                                    sleeperId: true,
                                     fullName: true,
                                     position: true,
                                     nflTeam: true,
@@ -158,6 +161,58 @@ export default async function LeagueDetailPage({
         : [];
 
     // ========================================================================
+    // TRADE PROPOSAL DATA (mirrors the draft room's socket state shapes)
+    // ========================================================================
+
+    // gte: include future-season picks acquired via trade, not just this board
+    const draftPicks = await prisma.draftPick.findMany({
+        where: { leagueId: params.leagueId, season: { gte: league.season } },
+        include: {
+            currentOwner: { include: { owner: { select: { name: true } } } },
+        },
+        orderBy: [{ season: "asc" }, { overallPickNumber: "asc" }],
+    });
+
+    const pickSummaries: DraftPickSummary[] = draftPicks.map((pick) => ({
+        id: pick.id,
+        season: pick.season,
+        round: pick.round,
+        pickInRound: pick.pickInRound ?? 0,
+        overallPickNumber: pick.overallPickNumber ?? 0,
+        currentOwnerId: pick.currentOwnerId,
+        currentOwnerName: pick.currentOwner.owner?.name || "Open Slot",
+        originalOwnerId: pick.originalOwnerId,
+        isComplete: pick.isComplete,
+        isKeeper: pick.isKeeper,
+    }));
+
+    const teamSummaries: TeamSummary[] = league.teams.map((t) => ({
+        id: t.id,
+        name: t.name,
+        ownerId: t.ownerId,
+        ownerName: t.owner?.name || t.owner?.email || "Open Slot",
+        draftPosition: t.draftPosition ?? 0,
+    }));
+
+    const socketRosters: Record<string, PlayerSummary[]> = Object.fromEntries(
+        league.teams.map((t) => [
+            t.id,
+            t.players.map((entry) => ({
+                id: entry.player.id,
+                sleeperId: entry.player.sleeperId,
+                fullName: entry.player.fullName,
+                position: entry.player.position,
+                nflTeam: entry.player.nflTeam,
+                rank: entry.player.rank,
+            })),
+        ])
+    );
+
+    const myTeamSummary = myTeamId
+        ? teamSummaries.find((t) => t.id === myTeamId) ?? null
+        : null;
+
+    // ========================================================================
     // SERIALIZE DATA FOR CLIENT COMPONENTS
     // ========================================================================
 
@@ -263,6 +318,7 @@ export default async function LeagueDetailPage({
                         {league.season} Season &middot; {filledTeams.length}/{league.maxTeams} teams filled
                     </p>
                 </div>
+                {isCommissioner && <InviteLinkButton leagueId={league.id} />}
             </div>
 
             <Separator className="my-6" />
@@ -286,21 +342,34 @@ export default async function LeagueDetailPage({
                         </Button>
                     </Link>
                 )}
+                {myTeamSummary && (
+                    <ProposeTradeButton
+                        leagueId={league.id}
+                        myTeam={myTeamSummary}
+                        allTeams={teamSummaries}
+                        myPlayers={socketRosters[myTeamSummary.id] || []}
+                        allPicks={pickSummaries}
+                        teamRosters={socketRosters}
+                        totalRounds={totalRounds}
+                        leagueSeason={league.season}
+                    />
+                )}
+                {(myTeamId || isCommissioner) && (
+                    <Link href={`/leagues/${league.id}/keepers`}>
+                        <Button variant="outline">
+                            <Trophy className="mr-2 h-4 w-4" />
+                            Keeper Selection
+                        </Button>
+                    </Link>
+                )}
                 {isCommissioner && (
                     <>
-                        <Link href={`/leagues/${league.id}/keepers`}>
-                            <Button variant="outline">
-                                <Trophy className="mr-2 h-4 w-4" />
-                                Keeper Selection
-                            </Button>
-                        </Link>
                         <Link href={`/leagues/${league.id}/settings`}>
                             <Button variant="outline">
                                 <Settings className="mr-2 h-4 w-4" />
                                 League Settings
                             </Button>
                         </Link>
-                        <InviteLinkButton leagueId={league.id} />
                         {draftStatus === "COMPLETED" && (
                             <StartNewSeasonButton
                                 leagueId={league.id}
@@ -312,7 +381,21 @@ export default async function LeagueDetailPage({
                 )}
             </div>
 
-            <div className="grid gap-6 md:grid-cols-2">
+            {/* ================================================================
+                TRADE BLOCK 2.0
+                ================================================================ */}
+            <Marketplace
+                leagueId={league.id}
+                myTeamId={myTeamId}
+                tradeBlockEntries={tradeBlockData}
+                myPlayers={myPlayers}
+                leagueRosters={allLeagueRosters}
+                isCommissioner={isCommissioner}
+                totalRounds={totalRounds}
+                totalPlayers={totalPlayers}
+            />
+
+            <div className="mt-8 grid gap-6 md:grid-cols-2">
                 {/* Teams */}
                 <Card>
                     <CardHeader>
@@ -325,7 +408,8 @@ export default async function LeagueDetailPage({
                         </CardDescription>
                     </CardHeader>
                     <CardContent>
-                        <div className="space-y-3">
+                        {/* Capped so large leagues don't stretch the page; scrolls internally */}
+                        <div className="space-y-3 max-h-[420px] overflow-y-auto pr-2">
                             {league.teams.map((team) => (
                                 <div
                                     key={team.id}
@@ -406,19 +490,6 @@ export default async function LeagueDetailPage({
                 )}
             </div>
 
-            {/* ================================================================
-                TRADE BLOCK 2.0
-                ================================================================ */}
-            <Marketplace
-                leagueId={league.id}
-                myTeamId={myTeamId}
-                tradeBlockEntries={tradeBlockData}
-                myPlayers={myPlayers}
-                leagueRosters={allLeagueRosters}
-                isCommissioner={isCommissioner}
-                totalRounds={totalRounds}
-                totalPlayers={totalPlayers}
-            />
         </div>
     );
 }
