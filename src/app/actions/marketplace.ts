@@ -79,6 +79,16 @@ export async function addToTradeBlock(formData: FormData) {
     throw new Error('Unauthorized');
   }
 
+  // Only players actually on this team's roster can be advertised
+  const rosterEntry = await prisma.playerRoster.findUnique({
+    where: { teamId_playerId: { teamId, playerId } },
+    select: { id: true },
+  });
+
+  if (!rosterEntry) {
+    throw new Error("Player is not on this team's roster");
+  }
+
   await prisma.tradeBlockEntry.upsert({
     where: { teamId_playerId: { teamId, playerId } },
     create: {
