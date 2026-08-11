@@ -437,6 +437,35 @@ export class TradeProcessor {
     const positionById = new Map(tradedPlayers.map((p) => [p.id, p.position]));
     const pickSeasonById = new Map(tradedPicks.map((p) => [p.id, p.season]));
 
+    // League rule: both sides must send the same number of picks per season
+    // (rounds within a season are free). Commissioner trades skip this whole
+    // method, so the repair escape hatch stays open.
+    const pickCountsBySeason = (side: TradeSideAssets): Map<number, number> => {
+      const counts = new Map<number, number>();
+      for (const id of side.draftPickIds) {
+        const pickSeason = pickSeasonById.get(id);
+        if (pickSeason !== undefined) {
+          counts.set(pickSeason, (counts.get(pickSeason) ?? 0) + 1);
+        }
+      }
+      for (const futureSeason of side.futurePickSeasons) {
+        counts.set(futureSeason, (counts.get(futureSeason) ?? 0) + 1);
+      }
+      return counts;
+    };
+
+    const countsA = pickCountsBySeason(sideA);
+    const countsB = pickCountsBySeason(sideB);
+    for (const pickSeason of new Set([...countsA.keys(), ...countsB.keys()])) {
+      const a = countsA.get(pickSeason) ?? 0;
+      const b = countsB.get(pickSeason) ?? 0;
+      if (a !== b) {
+        throw new Error(
+          `Trade blocked: pick counts must match within each season — ${pickSeason}: ${sideA.teamName} sends ${a}, ${sideB.teamName} sends ${b}`
+        );
+      }
+    }
+
     // Only current-season picks affect this draft's math
     const currentSeasonPicks = (side: TradeSideAssets): number =>
       side.draftPickIds.filter((id) => pickSeasonById.get(id) === season).length +

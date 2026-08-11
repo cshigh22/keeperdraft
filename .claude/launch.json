@@ -5,13 +5,15 @@
       "name": "next-dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 3000
+      "port": 3000,
+      "autoPort": false
     },
     {
       "name": "socket-dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "socket"],
-      "port": 3001
+      "port": 3001,
+      "autoPort": false
     }
   ]
 }
