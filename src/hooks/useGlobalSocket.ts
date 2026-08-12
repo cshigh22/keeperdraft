@@ -17,6 +17,9 @@ export function useGlobalSocket(userId?: string) {
   const [activeTrade, setActiveTrade] = useState<TradeOfferedPayload | null>(null);
   // A commissioner-executed trade involving one of this user's teams
   const [executedTrade, setExecutedTrade] = useState<TradeAcceptedPayload | null>(null);
+  // One-line outcome of an offer this user proposed or received (accepted /
+  // declined / withdrawn by the other side)
+  const [outcomeNotice, setOutcomeNotice] = useState<string | null>(null);
   const socketRef = useRef<TypedSocket | null>(null);
 
   useEffect(() => {
@@ -61,15 +64,26 @@ export function useGlobalSocket(userId?: string) {
             payload.receiverTeam.ownerId === userId)
         ) {
           setExecutedTrade(payload);
+        } else if (!payload.forcedByCommissioner && payload.initiatorTeam.ownerId === userId) {
+          // The receiver accepted this user's offer
+          setOutcomeNotice(`${payload.receiverTeam.name} accepted your trade offer`);
         }
     };
 
     const onTradeRejected = (payload: TradeRejectedPayload) => {
+        console.log('Global trade rejected received:', payload.tradeId);
         setActiveTrade(current => current?.tradeId === payload.tradeId ? null : current);
+        if (payload.rejectedBy === 'receiver' && payload.initiatorOwnerId === userId) {
+          setOutcomeNotice(`${payload.receiverTeamName ?? 'The other team'} declined your trade offer`);
+        }
     };
 
     const onTradeCancelled = (payload: TradeRejectedPayload) => {
+        console.log('Global trade cancelled received:', payload.tradeId);
         setActiveTrade(current => current?.tradeId === payload.tradeId ? null : current);
+        if (payload.rejectedBy === 'initiator' && payload.receiverOwnerId === userId) {
+          setOutcomeNotice(`${payload.initiatorTeamName ?? 'The other team'} withdrew their trade offer`);
+        }
     };
 
     socketRef.current.on('connect', onConnect);
@@ -107,7 +121,14 @@ export function useGlobalSocket(userId?: string) {
     setActiveTrade(null);
   }, []);
 
+  // Initiator withdrawing their own pending offer
+  const cancelTrade = useCallback((tradeId: string) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit(SocketEvents.TRADE_CANCELLED, { tradeId });
+  }, []);
+
   const clearExecutedTrade = useCallback(() => setExecutedTrade(null), []);
+  const clearOutcomeNotice = useCallback(() => setOutcomeNotice(null), []);
 
   return {
     socket: socketRef.current,
@@ -116,7 +137,10 @@ export function useGlobalSocket(userId?: string) {
     setActiveTrade,
     executedTrade,
     clearExecutedTrade,
+    outcomeNotice,
+    clearOutcomeNotice,
     acceptTrade,
     rejectTrade,
+    cancelTrade,
   };
 }

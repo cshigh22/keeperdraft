@@ -354,13 +354,26 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
 
 // Trade responses can arrive on the global socket, which has no joined league,
 // so the room to broadcast into comes from the trade itself rather than from a
-// client-supplied id that could point at another league.
-async function getTradeLeagueId(tradeId: string): Promise<string | null> {
+// client-supplied id that could point at another league. Both managers' private
+// user rooms are included so outcomes reach them outside the draft room too.
+async function getTradeBroadcastTargets(tradeId: string) {
   const trade = await prisma.trade.findUnique({
     where: { id: tradeId },
-    select: { leagueId: true },
+    select: {
+      leagueId: true,
+      initiatorTeam: { select: { name: true, ownerId: true } },
+      receiverTeam: { select: { name: true, ownerId: true } },
+    },
   });
-  return trade?.leagueId ?? null;
+  if (!trade) return null;
+  return {
+    leagueId: trade.leagueId,
+    initiatorTeam: trade.initiatorTeam,
+    receiverTeam: trade.receiverTeam,
+    ownerIds: [trade.initiatorTeam.ownerId, trade.receiverTeam.ownerId].filter(
+      (id): id is string => !!id
+    ),
+  };
 }
 
 function registerTradeHandlers(socket: DraftSocket): void {
@@ -440,20 +453,13 @@ function registerTradeHandlers(socket: DraftSocket): void {
       tradeId = offered.tradeId;
       // Deliberately no TRADE_OFFERED emit — there is no pending offer to show.
 
-      const payload = await finalizeTradeExecution(
+      await finalizeTradeExecution(
         leagueId,
         offered.tradeId,
         true,
         socket.data.userId,
         { activityType: 'TRADE_FORCED' }
       );
-
-      // Both affected managers hear about it even outside the draft room
-      for (const team of [payload.initiatorTeam, payload.receiverTeam]) {
-        if (team.ownerId) {
-          io.to(`user:${team.ownerId}`).emit(SocketEvents.TRADE_ACCEPTED, payload);
-        }
-      }
     } catch (error) {
       // If acceptance failed after the row was created, cancel it so it never
       // lingers as a pending offer in state syncs.
@@ -480,20 +486,28 @@ function registerTradeHandlers(socket: DraftSocket): void {
 
   socket.on(SocketEvents.TRADE_REJECTED, async ({ tradeId }) => {
     try {
-      const leagueId = await getTradeLeagueId(tradeId);
-      if (!leagueId) {
+      const targets = await getTradeBroadcastTargets(tradeId);
+      if (!targets) {
         emitError(socket, 'TRADE_NOT_FOUND', 'Trade not found');
         return;
       }
 
       await tradeProcessor.rejectTrade(tradeId, socket.data.userId);
 
-      io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_REJECTED, {
-        leagueId,
+      const payload = {
+        leagueId: targets.leagueId,
         tradeId,
-        rejectedBy: 'receiver',
+        rejectedBy: 'receiver' as const,
         timestamp: new Date().toISOString(),
-      });
+        initiatorTeamName: targets.initiatorTeam.name,
+        receiverTeamName: targets.receiverTeam.name,
+        initiatorOwnerId: targets.initiatorTeam.ownerId,
+        receiverOwnerId: targets.receiverTeam.ownerId,
+      };
+      io.to(getRoomName(targets.leagueId)).emit(SocketEvents.TRADE_REJECTED, payload);
+      for (const ownerId of targets.ownerIds) {
+        io.to(`user:${ownerId}`).emit(SocketEvents.TRADE_REJECTED, payload);
+      }
     } catch (error) {
       console.error('Error rejecting trade:', error);
       emitError(socket, 'TRADE_REJECT_FAILED', errorMessage(error, 'Failed to reject trade'));
@@ -502,20 +516,28 @@ function registerTradeHandlers(socket: DraftSocket): void {
 
   socket.on(SocketEvents.TRADE_CANCELLED, async ({ tradeId }) => {
     try {
-      const leagueId = await getTradeLeagueId(tradeId);
-      if (!leagueId) {
+      const targets = await getTradeBroadcastTargets(tradeId);
+      if (!targets) {
         emitError(socket, 'TRADE_NOT_FOUND', 'Trade not found');
         return;
       }
 
       await tradeProcessor.cancelTrade(tradeId, socket.data.userId);
 
-      io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_CANCELLED, {
-        leagueId,
+      const payload = {
+        leagueId: targets.leagueId,
         tradeId,
-        rejectedBy: 'initiator',
+        rejectedBy: 'initiator' as const,
         timestamp: new Date().toISOString(),
-      });
+        initiatorTeamName: targets.initiatorTeam.name,
+        receiverTeamName: targets.receiverTeam.name,
+        initiatorOwnerId: targets.initiatorTeam.ownerId,
+        receiverOwnerId: targets.receiverTeam.ownerId,
+      };
+      io.to(getRoomName(targets.leagueId)).emit(SocketEvents.TRADE_CANCELLED, payload);
+      for (const ownerId of targets.ownerIds) {
+        io.to(`user:${ownerId}`).emit(SocketEvents.TRADE_CANCELLED, payload);
+      }
     } catch (error) {
       console.error('Error cancelling trade:', error);
       emitError(socket, 'TRADE_CANCEL_FAILED', errorMessage(error, 'Failed to cancel trade'));
@@ -618,6 +640,15 @@ async function finalizeTradeExecution(
   };
 
   io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_ACCEPTED, acceptedPayload);
+
+  // Both managers hear the outcome in their private rooms too, so a proposer
+  // who is neither in the draft room nor online-at-the-moment still learns
+  // their offer completed (their inbox/toast picks it up on next connect/view).
+  for (const team of [acceptedPayload.initiatorTeam, acceptedPayload.receiverTeam]) {
+    if (team.ownerId) {
+      io.to(`user:${team.ownerId}`).emit(SocketEvents.TRADE_ACCEPTED, acceptedPayload);
+    }
+  }
 
   // Send full state sync to ensure all clients have accurate state
   // (especially currentTeamId if the pick was traded)

@@ -80,6 +80,13 @@ interface TradeModalProps {
     notes?: string
   ) => void;
   disabled?: boolean;
+  // Controlled mode (e.g. counter-offers): the parent owns open state and no
+  // trigger button is rendered. Initial selections are applied on open.
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  initialTargetTeamId?: string;
+  initialMyAssetIds?: string[];
+  initialTheirAssetIds?: string[];
 }
 
 // A selectable asset in the trade UI (not the persisted TradeAsset row)
@@ -242,8 +249,15 @@ export function TradeModal({
   commissionerMode = false,
   onCommissionerTrade,
   disabled = false,
+  open: controlledOpen,
+  onOpenChange,
+  initialTargetTeamId,
+  initialMyAssetIds,
+  initialTheirAssetIds,
 }: TradeModalProps) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const isControlled = controlledOpen !== undefined;
+  const open = isControlled ? controlledOpen : internalOpen;
   const [selectedTeamAId, setSelectedTeamAId] = useState<string>('');
   const [selectedTeamId, setSelectedTeamId] = useState<string>('');
   const [selectedMyAssets, setSelectedMyAssets] = useState<Set<string>>(new Set());
@@ -383,24 +397,40 @@ export function TradeModal({
     }
 
     resetSelections();
-    setOpen(false);
+    handleOpenChange(false);
   };
 
   const handleOpenChange = (newOpen: boolean) => {
-    setOpen(newOpen);
+    if (isControlled) {
+      onOpenChange?.(newOpen);
+    } else {
+      setInternalOpen(newOpen);
+    }
     if (!newOpen) {
       resetSelections();
     }
   };
 
+  // Seed selections when opened with initial values (counter-offer flow).
+  // Runs only on the closed→open transition, so in-dialog edits are untouched.
+  useEffect(() => {
+    if (!open) return;
+    if (initialTargetTeamId) setSelectedTeamId(initialTargetTeamId);
+    if (initialMyAssetIds) setSelectedMyAssets(new Set(initialMyAssetIds));
+    if (initialTheirAssetIds) setSelectedTheirAssets(new Set(initialTheirAssetIds));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogTrigger asChild>
-        <Button variant="outline" disabled={disabled}>
-          <ArrowLeftRight className="w-4 h-4 mr-2" />
-          {commissionerMode ? 'Commissioner Trade' : 'Propose Trade'}
-        </Button>
-      </DialogTrigger>
+      {!isControlled && (
+        <DialogTrigger asChild>
+          <Button variant="outline" disabled={disabled}>
+            <ArrowLeftRight className="w-4 h-4 mr-2" />
+            {commissionerMode ? 'Commissioner Trade' : 'Propose Trade'}
+          </Button>
+        </DialogTrigger>
+      )}
 
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
         <DialogHeader>
@@ -560,7 +590,7 @@ export function TradeModal({
         </div>
 
         <DialogFooter className="mt-4">
-          <Button variant="outline" onClick={() => setOpen(false)}>
+          <Button variant="outline" onClick={() => handleOpenChange(false)}>
             Cancel
           </Button>
           <Button onClick={handlePropose} disabled={!canPropose}>

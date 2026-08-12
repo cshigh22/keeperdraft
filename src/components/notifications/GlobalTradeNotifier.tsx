@@ -69,11 +69,50 @@ function ExecutedTradeToast({
   );
 }
 
+const OUTCOME_TOAST_MS = 8000;
+
+// One-line notice that the other side accepted / declined / withdrew an offer
+function OutcomeToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, OUTCOME_TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [onDismiss]);
+
+  return (
+    <div className="fixed bottom-6 right-6 z-50 w-[380px] animate-in slide-in-from-right-full fade-in duration-500 ease-out">
+      <Card className="border-2 border-blue-500 shadow-2xl bg-white/95 backdrop-blur-sm overflow-hidden">
+        <CardContent className="p-4">
+          <div className="flex items-start gap-3">
+            <div className="p-1.5 bg-blue-500 rounded-md shrink-0">
+              <ArrowLeftRight className="w-4 h-4 text-white" />
+            </div>
+            <p className="flex-1 min-w-0 font-bold text-sm text-slate-900">{message}</p>
+            <button
+              className="text-slate-400 hover:text-slate-600 shrink-0"
+              onClick={onDismiss}
+              aria-label="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export function GlobalTradeNotifier() {
   const { data: session } = useSession();
   const userId = session?.user?.id;
-  const { activeTrade, acceptTrade, rejectTrade, executedTrade, clearExecutedTrade } =
-    useGlobalSocket(userId);
+  const {
+    activeTrade,
+    acceptTrade,
+    rejectTrade,
+    executedTrade,
+    clearExecutedTrade,
+    outcomeNotice,
+    clearOutcomeNotice,
+  } = useGlobalSocket(userId);
   const pathname = usePathname();
 
   // Don't show global notification if we're already on the draft page
@@ -98,6 +137,10 @@ export function GlobalTradeNotifier() {
 
   if (executedTrade) {
     return <ExecutedTradeToast trade={executedTrade} onDismiss={clearExecutedTrade} />;
+  }
+
+  if (outcomeNotice) {
+    return <OutcomeToast message={outcomeNotice} onDismiss={clearOutcomeNotice} />;
   }
 
   return null;

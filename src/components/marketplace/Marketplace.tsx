@@ -27,6 +27,7 @@ import {
   Users,
   Trash2,
   AlertCircle,
+  Inbox,
 } from 'lucide-react';
 import { TradeBlockCard } from './TradeBlockCard';
 import { addToTradeBlock, removeFromTradeBlock } from '@/app/actions/marketplace';
@@ -50,6 +51,10 @@ interface MarketplaceProps {
   isCommissioner: boolean;
   // Rendered at the right end of the section header (e.g. Propose Trade)
   headerAction?: React.ReactNode;
+  // Content of the Pending Trades tab (built by the league page, which owns
+  // the trade data) plus the incoming-offer count for the tab badge
+  pendingTradesTab?: React.ReactNode;
+  pendingIncomingCount?: number;
 }
 
 const POSITIONS = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DEF'] as const;
@@ -105,6 +110,8 @@ export function Marketplace({
   leagueRosters,
   isCommissioner,
   headerAction,
+  pendingTradesTab,
+  pendingIncomingCount = 0,
 }: MarketplaceProps) {
   const [positionFilter, setPositionFilter] = useState<string>('ALL');
   const [rosterSearch, setRosterSearch] = useState('');
@@ -273,7 +280,7 @@ export function Marketplace({
 
       {/* Main Tabs */}
       <Tabs defaultValue="block" className="w-full">
-        <TabsList className="w-full grid grid-cols-3 h-10">
+        <TabsList className={cn('w-full grid h-10', pendingTradesTab ? 'grid-cols-4' : 'grid-cols-3')}>
           <TabsTrigger value="block" className="text-xs gap-1.5">
             <Store className="w-3.5 h-3.5" />
             Trade Block
@@ -283,6 +290,17 @@ export function Marketplace({
               </Badge>
             )}
           </TabsTrigger>
+          {pendingTradesTab && (
+            <TabsTrigger value="pending" className="text-xs gap-1.5">
+              <Inbox className="w-3.5 h-3.5" />
+              Pending Trades
+              {pendingIncomingCount > 0 && (
+                <Badge className="h-4 px-1 text-[9px] ml-1 bg-blue-600 text-white hover:bg-blue-600">
+                  {pendingIncomingCount}
+                </Badge>
+              )}
+            </TabsTrigger>
+          )}
           <TabsTrigger value="rosters" className="text-xs gap-1.5">
             <Users className="w-3.5 h-3.5" />
             League Rosters
@@ -292,6 +310,15 @@ export function Marketplace({
             My Status
           </TabsTrigger>
         </TabsList>
+
+        {pendingTradesTab && (
+          // forceMount keeps the inbox's socket listeners alive on other tabs,
+          // so offers arriving while the user looks elsewhere still refresh the
+          // page (and the tab badge) live
+          <TabsContent value="pending" forceMount className="mt-4 data-[state=inactive]:hidden">
+            {pendingTradesTab}
+          </TabsContent>
+        )}
 
         {/* ================================================================
             TAB 1: TRADE BLOCK

@@ -11,6 +11,8 @@ import { Users, Settings, Trophy, Play, ArrowLeft, ArrowLeftRight, History } fro
 import { InviteLinkButton } from "@/components/league/InviteLinkButton";
 import { ProposeTradeButton } from "@/components/trade/ProposeTradeButton";
 import { CommissionerTradeButton } from "@/components/trade/CommissionerTradeButton";
+import { PendingTrades } from "@/components/trade/PendingTrades";
+import type { PendingTradeAsset, PendingTradeData } from "@/components/trade/PendingTrades";
 import type { TeamSummary, PlayerSummary, DraftPickSummary } from "@/types/socket";
 import StartNewSeasonButton from "./StartNewSeasonButton";
 import { EditableTeamName } from "@/components/league/EditableTeamName";
@@ -224,6 +226,62 @@ export default async function LeagueDetailPage({
         : null;
 
     // ========================================================================
+    // PENDING TRADES (inbox — offers persist even if the receiver was offline)
+    // ========================================================================
+
+    const pendingTradeRows = await prisma.trade.findMany({
+        where: { leagueId: params.leagueId, status: 'PENDING' },
+        include: {
+            initiatorTeam: { select: { id: true, name: true } },
+            receiverTeam: { select: { id: true, name: true } },
+            assets: { include: { player: true, draftPick: true } },
+        },
+        orderBy: { proposedAt: 'desc' },
+    });
+
+    type PendingAssetRow = (typeof pendingTradeRows)[number]['assets'][number];
+    const pendingAssetLabel = (asset: PendingAssetRow): string => {
+        if (asset.player) return `${asset.player.fullName} (${asset.player.position})`;
+        if (asset.draftPick) {
+            return asset.draftPick.pickInRound != null
+                ? `${asset.draftPick.season} Pick ${asset.draftPick.round}.${asset.draftPick.pickInRound}`
+                : `${asset.draftPick.season} Round ${asset.draftPick.round}`;
+        }
+        if (asset.futurePickSeason && asset.futurePickRound) {
+            return `${asset.futurePickSeason} Round ${asset.futurePickRound}`;
+        }
+        return 'Draft pick';
+    };
+    const toPendingAsset = (asset: PendingAssetRow): PendingTradeAsset => ({
+        id: asset.id,
+        assetType: asset.assetType,
+        playerId: asset.playerId,
+        draftPickId: asset.draftPickId,
+        label: pendingAssetLabel(asset),
+    });
+
+    const pendingTradesData: PendingTradeData[] = pendingTradeRows.map((trade) => ({
+        tradeId: trade.id,
+        initiatorTeam: { id: trade.initiatorTeam.id, name: trade.initiatorTeam.name },
+        receiverTeam: { id: trade.receiverTeam.id, name: trade.receiverTeam.name },
+        initiatorAssets: trade.assets
+            .filter((a) => a.fromTeamId === trade.initiatorTeamId)
+            .map(toPendingAsset),
+        receiverAssets: trade.assets
+            .filter((a) => a.fromTeamId === trade.receiverTeamId)
+            .map(toPendingAsset),
+        proposedAt: trade.proposedAt.toISOString(),
+        expiresAt: trade.expiresAt?.toISOString() ?? null,
+    }));
+
+    const now = Date.now();
+    const pendingIncomingCount = pendingTradesData.filter(
+        (t) =>
+            t.receiverTeam.id === myTeamId &&
+            (!t.expiresAt || new Date(t.expiresAt).getTime() > now)
+    ).length;
+
+    // ========================================================================
     // SERIALIZE DATA FOR CLIENT COMPONENTS
     // ========================================================================
 
@@ -409,6 +467,21 @@ export default async function LeagueDetailPage({
                 myPlayers={myPlayers}
                 leagueRosters={allLeagueRosters}
                 isCommissioner={isCommissioner}
+                pendingIncomingCount={pendingIncomingCount}
+                pendingTradesTab={
+                    <PendingTrades
+                        leagueId={league.id}
+                        userId={session.user!.id}
+                        myTeam={myTeamSummary}
+                        allTeams={teamSummaries}
+                        myPlayers={myTeamSummary ? socketRosters[myTeamSummary.id] || [] : []}
+                        allPicks={pickSummaries}
+                        teamRosters={socketRosters}
+                        totalRounds={totalRounds}
+                        leagueSeason={league.season}
+                        pendingTrades={pendingTradesData}
+                    />
+                }
                 headerAction={
                     myTeamSummary ? (
                         <ProposeTradeButton

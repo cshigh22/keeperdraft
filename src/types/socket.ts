@@ -238,6 +238,12 @@ export interface TradeRejectedPayload {
   tradeId: string;
   rejectedBy: 'initiator' | 'receiver' | 'commissioner' | 'expired';
   timestamp: string;
+  // Who the trade was between, so a client receiving this in its private user
+  // room can tell which side it was on (optional: older emitters omit them)
+  initiatorTeamName?: string;
+  receiverTeamName?: string;
+  initiatorOwnerId?: string | null;
+  receiverOwnerId?: string | null;
 }
 
 // Order updated
