@@ -566,8 +566,9 @@ async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promis
 }
 
 // Shared execution tail for accepted and commissioner-executed trades:
-// pause-before-transfer ordering (so the timer can't fire a pick mid-trade),
-// atomic swap, state re-sync, broadcast, and activity log. Returns the payload
+// atomic swap, state re-sync, broadcast, and activity log. The draft is NOT
+// paused — clients announce the completed trade instead, and syncCurrentTeam
+// re-points the clock if the current pick changed owner. Returns the payload
 // so callers can emit it to additional rooms.
 async function finalizeTradeExecution(
   leagueId: string,
@@ -577,22 +578,12 @@ async function finalizeTradeExecution(
   log: { activityType: 'TRADE_ACCEPTED' | 'TRADE_FORCED' }
 ): Promise<TradeAcceptedPayload> {
   const manager = getDraftManager(leagueId);
-  const draftState = await manager.getCurrentState();
-
-  const shouldPause =
-    draftState.status === 'IN_PROGRESS' &&
-    (await shouldPauseForTrade(leagueId, tradeId, draftState.currentTeamId));
 
   // Mark as processing
   io.to(getRoomName(leagueId)).emit(SocketEvents.TRADE_PROCESSING, {
     leagueId,
     tradeId,
   });
-
-  // If we should pause, do it before processing
-  if (shouldPause) {
-    await manager.pauseDraft('Trade in progress', 'system');
-  }
 
   // Process the trade atomically
   const result = await tradeProcessor.acceptTrade(tradeId, forcedByCommissioner);
@@ -622,8 +613,6 @@ async function finalizeTradeExecution(
       [result.initiatorTeam.id]: initiatorRoster,
       [result.receiverTeam.id]: receiverRoster,
     },
-    draftPaused: shouldPause,
-    pauseReason: shouldPause ? 'Trade completed - draft paused for review' : undefined,
     forcedByCommissioner: forcedByCommissioner || undefined,
     timestamp: new Date().toISOString(),
   };
@@ -650,7 +639,6 @@ async function finalizeTradeExecution(
       metadata: {
         initiatorAssets: result.initiatorAssets,
         receiverAssets: result.receiverAssets,
-        draftPaused: shouldPause,
       } as unknown as Prisma.InputJsonValue,
     },
   });
@@ -727,60 +715,6 @@ io.on(SocketEvents.CONNECTION, (socket) => {
     console.log(`Client disconnected: ${socket.id}`);
   });
 });
-
-// ============================================================================
-// HELPER: Check if draft should pause for trade
-// ============================================================================
-
-// Picks traded within this window of the current pick trigger a pause
-const PAUSE_PICK_WINDOW = 3;
-
-async function shouldPauseForTrade(
-  leagueId: string,
-  tradeId: string,
-  currentTeamId: string | null
-): Promise<boolean> {
-  const settings = await prisma.draftSettings.findUnique({
-    where: { leagueId },
-  });
-
-  if (!settings?.pauseOnTrade) {
-    return false;
-  }
-
-  const trade = await prisma.trade.findUnique({
-    where: { id: tradeId },
-    include: {
-      assets: {
-        include: {
-          draftPick: true,
-        },
-      },
-    },
-  });
-
-  if (!trade) return false;
-
-  // Pause if either team in the trade is currently on the clock
-  if (trade.initiatorTeamId === currentTeamId || trade.receiverTeamId === currentTeamId) {
-    return true;
-  }
-
-  const currentState = await prisma.draftState.findUnique({
-    where: { leagueId },
-  });
-
-  if (!currentState) return false;
-
-  // Pause if any traded pick is upcoming soon
-  return trade.assets.some(
-    (asset) =>
-      asset.draftPick &&
-      !asset.draftPick.isComplete &&
-      asset.draftPick.overallPickNumber !== null &&
-      asset.draftPick.overallPickNumber <= currentState.currentPick + PAUSE_PICK_WINDOW
-  );
-}
 
 // ============================================================================
 // EXPORTS

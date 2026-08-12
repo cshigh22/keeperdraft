@@ -26,6 +26,7 @@ export interface TradeAssetRecord {
   draftPick: {
     id: string;
     round: number;
+    pickInRound: number | null;
     season: number;
     overallPickNumber: number | null;
   } | null;
@@ -72,6 +73,7 @@ export function toTradeAssetPayload(
       ? {
           id: asset.draftPick.id,
           round: asset.draftPick.round,
+          pickInRound: asset.draftPick.pickInRound ?? undefined,
           season: asset.draftPick.season,
           overallPickNumber: asset.draftPick.overallPickNumber ?? undefined,
         }

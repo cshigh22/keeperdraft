@@ -256,8 +256,6 @@ function applyTradeAccepted(prev: DraftState, payload: TradeAcceptedPayload): Dr
   return {
     ...prev,
     pendingTrades: prev.pendingTrades.filter((t) => t.tradeId !== payload.tradeId),
-    isPaused: payload.draftPaused ? true : prev.isPaused,
-    pauseReason: payload.pauseReason || prev.pauseReason,
     teamRosters: mergeRosterUpdates(prev.teamRosters, payload.teamRosterUpdates),
     allPicks: payload.updatedDraftOrder
       ? mergeUpdatedPicks(prev.allPicks, payload.updatedDraftOrder)

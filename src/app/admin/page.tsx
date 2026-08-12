@@ -11,7 +11,6 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
@@ -440,12 +439,6 @@ function CommissionerDashboardContent() {
                   </div>
                 </div>
 
-                <div className="flex items-center space-x-2">
-                  <Switch id="pauseOnTrade" defaultChecked />
-                  <Label htmlFor="pauseOnTrade">
-                    Auto-pause draft when trade is accepted
-                  </Label>
-                </div>
               </div>
             </CardContent>
           </Card>

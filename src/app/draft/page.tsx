@@ -21,6 +21,7 @@ import { PlayerPool } from '@/components/draft/PlayerPool';
 import { SidebarRoster } from '@/components/draft/SidebarRoster';
 import { DraftTimer } from '@/components/draft/DraftTimer';
 import { TradeModal, IncomingTradePopup } from '@/components/trade/TradeModal';
+import { TradeCompletedPopup } from '@/components/trade/TradeCompletedPopup';
 import { SocketErrorToast, FATAL_ERROR_CODES } from '@/components/draft/SocketErrorToast';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
 import { useSession, signOut } from 'next-auth/react';
@@ -42,7 +43,7 @@ import {
   Search,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { TradeOfferedPayload } from '@/types/socket';
+import type { TradeAcceptedPayload, TradeOfferedPayload } from '@/types/socket';
 import { revalidateLeague } from '@/app/actions/league';
 
 // ============================================================================
@@ -99,6 +100,7 @@ function DraftRoomContent() {
   const leagueId = searchParams.get('leagueId') || '';
   const [userTeam, setUserTeam] = useState<MyTeam>(null);
   const [incomingTrade, setIncomingTrade] = useState<TradeOfferedPayload | null>(null);
+  const [completedTrade, setCompletedTrade] = useState<TradeAcceptedPayload | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('players');
@@ -133,6 +135,10 @@ function DraftRoomContent() {
       if (trade.receiverTeam.id === userTeam?.id) {
         setIncomingTrade(trade);
       }
+    },
+    onTradeAccepted: (trade) => {
+      // Announce the completed trade to everyone in the room
+      setCompletedTrade(trade);
     },
   });
 
@@ -445,6 +451,14 @@ function DraftRoomContent() {
           </Tabs>
         </div>
       </main>
+
+      {/* Trade Completed Announcement */}
+      {completedTrade && (
+        <TradeCompletedPopup
+          trade={completedTrade}
+          onDismiss={() => setCompletedTrade(null)}
+        />
+      )}
 
       {/* Incoming Trade Popup */}
       {incomingTrade && (

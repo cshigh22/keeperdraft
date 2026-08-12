@@ -119,6 +119,9 @@ export interface TradeAssetPayload {
   draftPick?: {
     id: string;
     round: number;
+    // Slot within the round (e.g. the 4 in "Pick 1.4"). Optional because
+    // payloads persisted in activity-log metadata predate this field.
+    pickInRound?: number;
     season: number;
     overallPickNumber?: number;
   };
@@ -224,9 +227,6 @@ export interface TradeAcceptedPayload {
   // Updated draft order if picks were traded
   updatedDraftOrder?: DraftPickSummary[];
   teamRosterUpdates?: Record<string, RosterPlayer[]>;
-  // If trade occurred while on the clock
-  draftPaused: boolean;
-  pauseReason?: string;
   // True when the commissioner executed this trade on the teams' behalf
   forcedByCommissioner?: boolean;
   timestamp: string;

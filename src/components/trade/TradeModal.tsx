@@ -585,7 +585,10 @@ type IncomingTradeAsset = Pick<
 
 function incomingAssetLabel(asset: IncomingTradeAsset): string {
   if (asset.assetType === 'DRAFT_PICK' && asset.draftPick) {
-    return `R${asset.draftPick.round} Pick`;
+    // Current-season picks have a known slot — show it exactly (e.g. "Pick 1.4")
+    return asset.draftPick.pickInRound != null
+      ? `Pick ${asset.draftPick.round}.${asset.draftPick.pickInRound}`
+      : `R${asset.draftPick.round} Pick`;
   }
   if (asset.assetType === 'FUTURE_PICK') {
     return `${asset.futurePickSeason} R${asset.futurePickRound}`;
@@ -593,7 +596,7 @@ function incomingAssetLabel(asset: IncomingTradeAsset): string {
   return asset.player?.fullName || 'Player';
 }
 
-function IncomingAssetList({
+export function IncomingAssetList({
   label,
   assets,
   tone,

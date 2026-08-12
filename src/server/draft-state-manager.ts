@@ -196,7 +196,7 @@ export class DraftStateManager {
       data: {
         currentTeamId: currentPick.currentOwnerId,
         timerSecondsRemaining: timerDuration,
-        timerStartedAt: state.status === 'IN_PROGRESS' ? now : null,
+        timerStartedAt: state.status === 'IN_PROGRESS' && !state.isPaused ? now : null,
       },
     });
 
@@ -221,8 +221,9 @@ export class DraftStateManager {
       this.room.emit(SocketEvents.ON_THE_CLOCK, payload);
     }
 
-    // If draft is in progress, restart the timer with full duration
-    if (state.status === 'IN_PROGRESS') {
+    // If draft is in progress (and not paused, e.g. by the commissioner),
+    // restart the timer with full duration for the pick's new owner
+    if (state.status === 'IN_PROGRESS' && !state.isPaused) {
       this.startTimer(timerDuration);
     }
 
