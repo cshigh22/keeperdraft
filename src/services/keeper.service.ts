@@ -81,16 +81,11 @@ export class KeeperService {
 
             const selectedIds = selections.map((s) => s.playerId);
 
-            // 6. Deselection: rows that only existed as keeper picks are removed;
-            // players acquired another way stay on the roster, just unflagged.
-            await tx.playerRoster.deleteMany({
-                where: {
-                    teamId,
-                    leagueId,
-                    acquiredVia: 'KEEPER',
-                    playerId: { notIn: selectedIds },
-                },
-            });
+            // Saving keepers never adds or removes roster rows — it only flips
+            // the keeper flag. Roster membership is managed by the draft,
+            // trades, and commissioner tools.
+
+            // 6. Deselection: unflag keepers that are no longer selected.
             await tx.playerRoster.updateMany({
                 where: {
                     teamId,
