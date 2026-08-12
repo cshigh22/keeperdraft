@@ -353,6 +353,7 @@ export class TradeProcessor {
       }
 
       // Swap players
+      const movedPlayerIds: string[] = [];
       for (const asset of trade.assets) {
         if (asset.assetType === 'PLAYER' && asset.playerId) {
           await tx.playerRoster.updateMany({
@@ -368,7 +369,20 @@ export class TradeProcessor {
               // Note: isKeeper status is preserved
             },
           });
+          movedPlayerIds.push(asset.playerId);
         }
+      }
+
+      // A traded player's trade-block listing belongs to the old owner and is
+      // void once they change teams; league-wide by player so stale duplicate
+      // rows die too.
+      if (movedPlayerIds.length > 0) {
+        await tx.tradeBlockEntry.deleteMany({
+          where: {
+            leagueId: trade.leagueId,
+            playerId: { in: movedPlayerIds },
+          },
+        });
       }
 
       await tx.trade.update({

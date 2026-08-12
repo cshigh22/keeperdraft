@@ -115,13 +115,21 @@ export async function removePlayerFromRoster(formData: FormData) {
 
   // Scoped to the league the caller was authorized for; a foreign league's
   // entry reads the same as a nonexistent one.
-  const { count } = await prisma.playerRoster.deleteMany({
+  const rosterEntry = await prisma.playerRoster.findFirst({
     where: { id: rosterEntryId, leagueId },
+    select: { id: true, teamId: true, playerId: true },
   });
 
-  if (count === 0) {
+  if (!rosterEntry) {
     throw new Error('Roster entry not found');
   }
+
+  await prisma.playerRoster.delete({ where: { id: rosterEntry.id } });
+
+  // The player's trade-block listing is void once they leave the roster
+  await prisma.tradeBlockEntry.deleteMany({
+    where: { teamId: rosterEntry.teamId, playerId: rosterEntry.playerId },
+  });
 
   revalidatePath(`/leagues/${leagueId}`);
   return { success: true };

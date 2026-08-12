@@ -100,7 +100,7 @@ export default async function LeagueDetailPage({
     // TRADE BLOCK DATA
     // ========================================================================
 
-    const tradeBlockEntries = await prisma.tradeBlockEntry.findMany({
+    const rawTradeBlockEntries = await prisma.tradeBlockEntry.findMany({
         where: { leagueId: params.leagueId, phase: 'PRE_DRAFT' },
         include: {
             player: {
@@ -127,6 +127,16 @@ export default async function LeagueDetailPage({
         },
         orderBy: { createdAt: "desc" },
     });
+
+    // A listing is only valid while the player is still on that team's roster.
+    // Roster departures (trades, drops, draft resets) can leave entries behind,
+    // so re-validate here rather than trusting the write-time check.
+    const rosterKeys = new Set(
+        league.teams.flatMap((team) => team.players.map((entry) => `${team.id}:${entry.player.id}`))
+    );
+    const tradeBlockEntries = rawTradeBlockEntries.filter(
+        (entry) => entry.playerId && rosterKeys.has(`${entry.teamId}:${entry.playerId}`)
+    );
 
     // ========================================================================
     // LEAGUE ROSTERS (for the marketplace tabs)
