@@ -83,49 +83,25 @@ export default async function KeepersPage({
         return <div>You don&apos;t have a team in this league.</div>;
     }
 
-    // Fetch ALL active players (the full player pool)
-    const allPlayers = await prisma.player.findMany({
-        where: { status: 'ACTIVE' },
-        orderBy: { rank: 'asc' },
-    });
-
-    // Fetch existing keeper selections for this team
-    const existingKeeperRoster = await prisma.playerRoster.findMany({
-        where: {
-            teamId: team.id,
-            leagueId,
-            isKeeper: true,
-        },
+    // Keepers can only be picked from the team's own roster
+    const roster = await prisma.playerRoster.findMany({
+        where: { teamId: team.id, leagueId },
+        include: { player: true },
+        orderBy: { player: { rank: 'asc' } },
     });
 
     // Build existing keepers map: { playerId: keeperRound | null }
     const existingKeepers: Record<string, number | null> = {};
-    for (const roster of existingKeeperRoster) {
-        existingKeepers[roster.playerId] = roster.keeperRound;
-    }
-
-    // Fetch keepers from OTHER teams (to show as unavailable)
-    const otherTeamKeepers = await prisma.playerRoster.findMany({
-        where: {
-            leagueId,
-            isKeeper: true,
-            teamId: { not: team.id },
-        },
-        include: {
-            team: { select: { name: true } },
-        },
-    });
-
-    // Build map: { playerId: teamName }
-    const keptByOtherTeams: Record<string, string> = {};
-    for (const k of otherTeamKeepers) {
-        keptByOtherTeams[k.playerId] = k.team.name;
+    for (const entry of roster) {
+        if (entry.isKeeper) {
+            existingKeepers[entry.playerId] = entry.keeperRound;
+        }
     }
 
     // Server Action wrapper
     async function saveKeepersAction(selections: any[]) {
         'use server';
-        await saveKeepers(team!.id, leagueId, selections);
+        return saveKeepers(team!.id, leagueId, selections);
     }
 
     return (
@@ -142,9 +118,8 @@ export default async function KeepersPage({
                 </Link>
             </div>
             <KeeperSelectionUI
-                players={JSON.parse(JSON.stringify(allPlayers))}
+                players={JSON.parse(JSON.stringify(roster.map((entry) => entry.player)))}
                 existingKeepers={existingKeepers}
-                keptByOtherTeams={keptByOtherTeams}
                 maxKeepers={settings.maxKeepers}
                 totalRounds={settings.totalRounds}
                 deadline={settings.keeperDeadline}

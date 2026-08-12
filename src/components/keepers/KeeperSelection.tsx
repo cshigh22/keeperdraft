@@ -22,11 +22,10 @@ import { formatRank } from '@/lib/rank';
 interface KeeperSelectionProps {
     players: Player[];
     existingKeepers: Record<string, number | null>; // playerId => keeperRound (null = no cost)
-    keptByOtherTeams?: Record<string, string>; // playerId => team name
     maxKeepers: number;
     totalRounds: number;
     deadline?: Date | null;
-    onSave: (selections: KeeperSelection[]) => Promise<void>;
+    onSave: (selections: KeeperSelection[]) => Promise<{ success: boolean; error?: string }>;
     isLoading?: boolean;
 }
 
@@ -59,7 +58,6 @@ const positionBadgeColors: Record<string, string> = {
 export function KeeperSelectionUI({
     players,
     existingKeepers,
-    keptByOtherTeams = {},
     maxKeepers,
     totalRounds,
     deadline,
@@ -137,8 +135,12 @@ export function KeeperSelectionUI({
                 playerId,
                 keeperRound: round,
             }));
-            await onSave(payload);
-            setSaveMessage('Keepers saved successfully!');
+            const result = await onSave(payload);
+            if (result.success) {
+                setSaveMessage('Keepers saved successfully!');
+            } else {
+                setSaveMessage(`Error: ${result.error || 'Failed to save keepers'}`);
+            }
         } catch (e) {
             setSaveMessage(`Error: ${e instanceof Error ? e.message : String(e)}`);
         } finally {
@@ -220,25 +222,23 @@ export function KeeperSelectionUI({
                         {filteredPlayers.length === 0 ? (
                             <div className="flex flex-col items-center justify-center py-20 text-slate-400 space-y-2">
                                 <Search className="w-12 h-12 opacity-10" />
-                                <p className="text-sm font-medium">No players found</p>
+                                <p className="text-sm font-medium">
+                                    {players.length === 0 ? 'No players on your roster' : 'No players found'}
+                                </p>
                             </div>
                         ) : (
                             filteredPlayers.map((player) => {
                                 const isSelected = selections.has(player.id);
                                 const selectedRound = selections.get(player.id);
-                                const keptByTeam = keptByOtherTeams[player.id];
-                                const isKeptByOther = !!keptByTeam;
 
                                 return (
                                     <div
                                         key={player.id}
                                         className={cn(
                                             "grid grid-cols-[40px,50px,1fr,50px,50px,140px] gap-2 px-4 py-2.5 items-center transition-all",
-                                            isKeptByOther
-                                                ? "opacity-50 bg-slate-50 border-l-4 border-l-transparent"
-                                                : isSelected
-                                                    ? "bg-primary/5 border-l-4 border-l-primary"
-                                                    : "hover:bg-slate-50 border-l-4 border-l-transparent"
+                                            isSelected
+                                                ? "bg-primary/5 border-l-4 border-l-primary"
+                                                : "hover:bg-slate-50 border-l-4 border-l-transparent"
                                         )}
                                     >
                                         {/* Checkbox */}
@@ -246,7 +246,7 @@ export function KeeperSelectionUI({
                                             <Checkbox
                                                 checked={isSelected}
                                                 onCheckedChange={() => toggleSelection(player.id)}
-                                                disabled={isKeptByOther || isDeadlinePassed || (!isSelected && currentCount >= maxKeepers)}
+                                                disabled={isDeadlinePassed || (!isSelected && currentCount >= maxKeepers)}
                                             />
                                         </div>
 
@@ -263,18 +263,10 @@ export function KeeperSelectionUI({
                                         {/* Player Name & Team */}
                                         <div className="pl-2 min-w-0">
                                             <div className="flex items-center gap-1.5">
-                                                <span className={cn(
-                                                    "text-sm font-semibold truncate",
-                                                    isKeptByOther && "text-slate-400 line-through"
-                                                )}>
+                                                <span className="text-sm font-semibold truncate">
                                                     {player.fullName}
                                                 </span>
-                                                {isKeptByOther && (
-                                                    <span className="text-[9px] font-bold text-orange-600 uppercase shrink-0 bg-orange-500/10 px-1.5 py-0.5 rounded-sm border border-orange-500/20">
-                                                        KEPT · {keptByTeam}
-                                                    </span>
-                                                )}
-                                                {player.injuryStatus && !isKeptByOther && (
+                                                {player.injuryStatus && (
                                                     <span className="text-[9px] font-bold text-red-500 uppercase shrink-0 bg-red-500/10 px-1 rounded-sm">
                                                         {player.injuryStatus}
                                                     </span>
@@ -297,9 +289,7 @@ export function KeeperSelectionUI({
 
                                         {/* Keeper Cost Dropdown (only if selected) */}
                                         <div className="flex justify-center">
-                                            {isKeptByOther ? (
-                                                <span className="text-xs text-slate-300">—</span>
-                                            ) : isSelected ? (
+                                            {isSelected ? (
                                                 <Select
                                                     value={selectedRound == null ? 'no_cost' : selectedRound.toString()}
                                                     onValueChange={(val) => updateRound(player.id, val === 'no_cost' ? null : parseInt(val))}

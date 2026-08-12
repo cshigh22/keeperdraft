@@ -66,51 +66,51 @@ export class KeeperService {
         // We'll trust the logic for now, but verification happens better with full pick context (Phase 2).
 
         return await prisma.$transaction(async (tx) => {
-            // 5. Clear ALL roster entries for this team before setting new keepers.
-            // Pre-draft, the roster should only contain keeper selections.
-            // The draft process will populate the rest of the roster.
+            // 5. Keepers can only be picked from the team's own roster.
+            const roster = await tx.playerRoster.findMany({
+                where: { teamId, leagueId },
+            });
+            const rosterByPlayer = new Map(roster.map((r) => [r.playerId, r]));
+
+            for (const selection of selections) {
+                if (!rosterByPlayer.has(selection.playerId)) {
+                    const player = await tx.player.findUnique({ where: { id: selection.playerId } });
+                    throw new Error(`${player?.fullName || selection.playerId} is not on your roster`);
+                }
+            }
+
+            const selectedIds = selections.map((s) => s.playerId);
+
+            // 6. Deselection: rows that only existed as keeper picks are removed;
+            // players acquired another way stay on the roster, just unflagged.
             await tx.playerRoster.deleteMany({
                 where: {
                     teamId,
                     leagueId,
+                    acquiredVia: 'KEEPER',
+                    playerId: { notIn: selectedIds },
                 },
             });
+            await tx.playerRoster.updateMany({
+                where: {
+                    teamId,
+                    leagueId,
+                    isKeeper: true,
+                    playerId: { notIn: selectedIds },
+                },
+                data: { isKeeper: false, keeperRound: null },
+            });
 
-            // 6. Set new keepers (upsert: create roster entry if player not already on team)
+            // 7. Selection: flag the existing rows so acquiredVia/acquiredAt survive.
             for (const selection of selections) {
-                // Check if player is already on ANY team in this league
-                const existingRoster = await tx.playerRoster.findUnique({
-                    where: {
-                        leagueId_playerId: {
-                            leagueId,
-                            playerId: selection.playerId,
-                        }
-                    }
-                });
-
-                if (existingRoster && existingRoster.teamId !== teamId) {
-                    // Player is on another team — skip or error
-                    const player = await tx.player.findUnique({ where: { id: selection.playerId } });
-                    throw new Error(`${player?.fullName || selection.playerId} is already on another team`);
-                }
-
-                // Upsert: update if on roster, create if not
-                await tx.playerRoster.upsert({
+                await tx.playerRoster.update({
                     where: {
                         teamId_playerId: {
                             teamId,
                             playerId: selection.playerId,
-                        }
+                        },
                     },
-                    create: {
-                        teamId,
-                        playerId: selection.playerId,
-                        leagueId,
-                        isKeeper: true,
-                        keeperRound: selection.keeperRound,
-                        acquiredVia: 'KEEPER',
-                    },
-                    update: {
+                    data: {
                         isKeeper: true,
                         keeperRound: selection.keeperRound,
                     },
