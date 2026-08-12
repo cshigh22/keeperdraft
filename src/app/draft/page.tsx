@@ -32,7 +32,6 @@ import {
   WifiOff,
   Settings,
   LogOut,
-  Bell,
   RefreshCw,
   AlertTriangle,
   Shield,
@@ -100,7 +99,6 @@ function DraftRoomContent() {
   const leagueId = searchParams.get('leagueId') || '';
   const [userTeam, setUserTeam] = useState<MyTeam>(null);
   const [incomingTrade, setIncomingTrade] = useState<TradeOfferedPayload | null>(null);
-  const [notificationCount, setNotificationCount] = useState(0);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [isInitializing, setIsInitializing] = useState(true);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('players');
@@ -135,7 +133,6 @@ function DraftRoomContent() {
       if (trade.receiverTeam.id === userTeam?.id) {
         setIncomingTrade(trade);
       }
-      setNotificationCount((n) => n + 1);
     },
   });
 
@@ -236,16 +233,6 @@ function DraftRoomContent() {
 
             {/* Right - User info and actions */}
             <div className="flex items-center gap-3">
-              {/* Notifications */}
-              <Button variant="ghost" size="icon" className="relative">
-                <Bell className="w-5 h-5" />
-                {notificationCount > 0 && (
-                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-destructive text-destructive-foreground text-xs rounded-full flex items-center justify-center">
-                    {notificationCount}
-                  </span>
-                )}
-              </Button>
-
               {/* Trade button */}
               {myTeam && (
                 <TradeModal
