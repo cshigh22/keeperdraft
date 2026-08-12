@@ -38,7 +38,7 @@ export function LegacyVault({ leagueId, pastWinners, isCommissioner }: LegacyVau
   const [season, setSeason] = useState(new Date().getFullYear() - 1);
   const [managerName, setManagerName] = useState('');
 
-  const sorted = [...pastWinners].sort((a, b) => b.season - a.season);
+  const sorted = [...pastWinners].sort((a, b) => a.season - b.season);
 
   const handleSubmit = () => {
     const formData = new FormData();
