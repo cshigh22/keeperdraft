@@ -23,6 +23,9 @@ interface DraftBoardProps {
   teams: TeamSummary[];
   completedPicks: DraftPickSummary[];
   allPicks: DraftPickSummary[];
+  // The draft's season; 0 until the first state sync. allPicks also carries
+  // trade-materialized future-season rows, which must not shadow board cells.
+  season: number;
   totalRounds: number;
   currentPick: number;
   currentTeamId: string | null;
@@ -216,6 +219,7 @@ const PickCell = React.memo(function PickCell({
 export function DraftBoard({
   teams,
   allPicks,
+  season,
   totalRounds,
   currentPick,
   currentTeamId,
@@ -225,8 +229,19 @@ export function DraftBoard({
   onTeamClick,
 }: DraftBoardProps) {
   const fullPickMap = useMemo(() => {
-    return new Map(allPicks.map((p) => [p.overallPickNumber, p]));
-  }, [allPicks]);
+    const map = new Map<number, DraftPickSummary>();
+    for (const pick of allPicks) {
+      if (season && pick.season !== season) continue;
+      if (pick.overallPickNumber <= 0) continue;
+      // Never let an unfilled duplicate of the same slot shadow a filled cell
+      const rival = map.get(pick.overallPickNumber);
+      if (rival?.isComplete && rival.selectedPlayer && !(pick.isComplete && pick.selectedPlayer)) {
+        continue;
+      }
+      map.set(pick.overallPickNumber, pick);
+    }
+    return map;
+  }, [allPicks, season]);
 
   const teamMap = useMemo(() => {
     return new Map(teams.map((t) => [t.id, t]));

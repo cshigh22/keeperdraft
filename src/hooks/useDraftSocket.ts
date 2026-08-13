@@ -187,21 +187,22 @@ function applyStateSync(prev: DraftState, payload: StateSyncPayload): DraftState
   };
 }
 
-function applyPickMade(prev: DraftState, payload: PickMadePayload): DraftState {
+export function applyPickMade(prev: DraftState, payload: PickMadePayload): DraftState {
   return {
     ...prev,
     // Filter out any optimistic pick matching this pick number to avoid duplicates
     completedPicks: [
-      ...prev.completedPicks.filter((p) => p.overallPickNumber !== payload.pickNumber),
+      ...prev.completedPicks.filter(
+        (p) => !(p.season === payload.pick.season && p.overallPickNumber === payload.pickNumber)
+      ),
       payload.pick,
     ],
     // Remove player (may already be removed by optimistic update)
     availablePlayers: prev.availablePlayers.filter((p) => p.id !== payload.player.id),
-    // Replace the pick at this overall pick number so the official server pick
-    // supersedes our optimistic "opt-..." pick
-    allPicks: prev.allPicks.map((p) =>
-      p.overallPickNumber === payload.pickNumber ? payload.pick : p
-    ),
+    // Upsert the official server pick into its board slot so it supersedes our
+    // optimistic "opt-..." entry — and is appended rather than silently dropped
+    // when no entry occupies the slot (e.g. after a stale or partial sync).
+    allPicks: upsertPickIntoSlot(prev.allPicks, payload.pick, payload.pickNumber),
     currentPick: payload.nextPick?.pickNumber || prev.currentPick,
     currentRound: payload.nextPick?.round || prev.currentRound,
     currentTeamId: payload.nextPick?.teamId || null,
@@ -238,7 +239,42 @@ function applyPlayerTaken(prev: DraftState, playerId: string): DraftState {
   };
 }
 
-function mergeUpdatedPicks(
+function sortPicks(picks: DraftPickSummary[]): DraftPickSummary[] {
+  return picks.sort((a, b) => a.season - b.season || a.overallPickNumber - b.overallPickNumber);
+}
+
+// Replace whatever occupies the given board slot with the official pick,
+// appending instead of dropping it when no entry matches the slot.
+function upsertPickIntoSlot(
+  picks: DraftPickSummary[],
+  pick: DraftPickSummary,
+  slotNumber: number
+): DraftPickSummary[] {
+  return sortPicks([
+    ...picks.filter(
+      (p) =>
+        !(
+          p.season === pick.season &&
+          (p.overallPickNumber === slotNumber || p.overallPickNumber === pick.overallPickNumber)
+        )
+    ),
+    pick,
+  ]);
+}
+
+// On a slot collision, keep the entry that actually shows a drafted player,
+// then prefer real DB ids over optimistic "opt-..." ones.
+function preferPick(pick: DraftPickSummary, rival: DraftPickSummary): boolean {
+  const pickFilled = pick.isComplete && !!pick.selectedPlayer;
+  const rivalFilled = rival.isComplete && !!rival.selectedPlayer;
+  if (pickFilled !== rivalFilled) return pickFilled;
+  const pickReal = !pick.id.startsWith('opt-');
+  const rivalReal = !rival.id.startsWith('opt-');
+  if (pickReal !== rivalReal) return pickReal;
+  return false;
+}
+
+export function mergeUpdatedPicks(
   picks: DraftPickSummary[],
   updates: DraftPickSummary[]
 ): DraftPickSummary[] {
@@ -247,9 +283,25 @@ function mergeUpdatedPicks(
     const existing = pickById.get(updated.id);
     pickById.set(updated.id, existing ? { ...existing, ...updated } : updated);
   }
-  return Array.from(pickById.values()).sort(
-    (a, b) => a.season - b.season || a.overallPickNumber - b.overallPickNumber
-  );
+
+  // A trade payload can carry a row the client knew under another id (an
+  // optimistic "opt-..." entry, or a row born before the client joined),
+  // leaving two entries claiming the same board slot; the board renders one
+  // per slot, so an unfilled duplicate could shadow a completed pick. Slot
+  // numbers <= 0 are exempt: unslotted future picks all share 0 and are
+  // distinct picks, not duplicates.
+  const bySlot = new Map<string, DraftPickSummary>();
+  const unslotted: DraftPickSummary[] = [];
+  for (const pick of pickById.values()) {
+    if (pick.overallPickNumber <= 0) {
+      unslotted.push(pick);
+      continue;
+    }
+    const key = `${pick.season}:${pick.overallPickNumber}`;
+    const rival = bySlot.get(key);
+    if (!rival || preferPick(pick, rival)) bySlot.set(key, pick);
+  }
+  return sortPicks([...unslotted, ...bySlot.values()]);
 }
 
 function applyTradeAccepted(prev: DraftState, payload: TradeAcceptedPayload): DraftState {
@@ -348,6 +400,22 @@ function buildOptimisticPick(
   idPrefix: string,
   fallbackOwnerName: string
 ): DraftPickSummary {
+  // Build on top of the real slot row when the client has one, so the DB id
+  // survives the optimistic window and later by-id merges (trade payloads,
+  // undo) still find the pick.
+  const existing = prev.allPicks.find(
+    (p) => p.overallPickNumber === prev.currentPick && (!prev.season || p.season === prev.season)
+  );
+  if (existing) {
+    return {
+      ...existing,
+      isComplete: true,
+      isKeeper: false,
+      selectedPlayer: player,
+      selectedAt: new Date().toISOString(),
+    };
+  }
+
   return {
     id: `${idPrefix}-${Date.now()}`,
     season: prev.season || new Date().getFullYear(),
@@ -619,9 +687,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
           ...prev,
           availablePlayers: prev.availablePlayers.filter((p) => p.id !== playerId),
           completedPicks: [...prev.completedPicks, optimisticPick],
-          allPicks: prev.allPicks.map((p) =>
-            p.overallPickNumber === prev.currentPick ? optimisticPick : p
-          ),
+          allPicks: upsertPickIntoSlot(prev.allPicks, optimisticPick, prev.currentPick),
           teamRosters: {
             ...prev.teamRosters,
             [teamId]: [...(prev.teamRosters[teamId] || []), rosterAddition],
@@ -772,9 +838,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
           ...prev,
           availablePlayers: prev.availablePlayers.filter((p) => p.id !== playerId),
           completedPicks: [...prev.completedPicks, optimisticPick],
-          allPicks: prev.allPicks.map((p) =>
-            p.overallPickNumber === prev.currentPick ? optimisticPick : p
-          ),
+          allPicks: upsertPickIntoSlot(prev.allPicks, optimisticPick, prev.currentPick),
           teamRosters: {
             ...prev.teamRosters,
             [teamIdToDraft]: [

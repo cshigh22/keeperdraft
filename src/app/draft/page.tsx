@@ -386,6 +386,7 @@ function DraftRoomContent() {
             teams={state.draftOrder}
             completedPicks={state.completedPicks}
             allPicks={state.allPicks}
+            season={state.season}
             totalRounds={state.totalRounds}
             currentPick={state.currentPick}
             currentTeamId={state.currentTeamId}

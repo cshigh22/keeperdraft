@@ -334,9 +334,19 @@ export class TradeProcessor {
           asset.draftPickId &&
           (asset.assetType === 'DRAFT_PICK' || asset.assetType === 'FUTURE_PICK')
         ) {
-          const updatedPick = await tx.draftPick.update({
-            where: { id: asset.draftPickId },
+          // validateAssetsForSwap ran outside this transaction, so re-assert
+          // in-tx that the pick is still on the board; otherwise a pick made
+          // while the trade is being accepted would change owner after the
+          // fact and its board record could later be corrupted by an undo.
+          const transferred = await tx.draftPick.updateMany({
+            where: { id: asset.draftPickId, isComplete: false },
             data: { currentOwnerId: recipientOf(asset) },
+          });
+          if (transferred.count === 0) {
+            throw new Error('A traded pick was used to draft while the trade was being accepted');
+          }
+          const updatedPick = await tx.draftPick.findUniqueOrThrow({
+            where: { id: asset.draftPickId },
             include: {
               currentOwner: { include: { owner: { select: { name: true } } } },
             },
@@ -875,6 +885,7 @@ interface PickWithOwnerName {
   originalOwnerId: string;
   isComplete: boolean;
   isKeeper: boolean;
+  selectedAt: Date | null;
   currentOwner: { owner: { name: string | null } | null };
 }
 
@@ -890,5 +901,6 @@ function toDraftPickSummary(pick: PickWithOwnerName): DraftPickSummary {
     originalOwnerId: pick.originalOwnerId,
     isComplete: pick.isComplete,
     isKeeper: pick.isKeeper,
+    selectedAt: pick.selectedAt?.toISOString(),
   };
 }

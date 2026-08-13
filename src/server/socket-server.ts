@@ -545,8 +545,8 @@ function registerTradeHandlers(socket: DraftSocket): void {
   });
 }
 
-// The critical path: validates, optionally pauses the draft, processes the
-// trade atomically, then re-syncs every client.
+// The critical path: validates, processes the trade atomically, then
+// broadcasts the targeted trade events to every client.
 async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promise<void> {
   const trade = await prisma.trade.findUnique({
     where: { id: tradeId },
@@ -588,7 +588,7 @@ async function handleTradeAccepted(socket: DraftSocket, tradeId: string): Promis
 }
 
 // Shared execution tail for accepted and commissioner-executed trades:
-// atomic swap, state re-sync, broadcast, and activity log. The draft is NOT
+// atomic swap, targeted broadcasts, and activity log. The draft is NOT
 // paused — clients announce the completed trade instead, and syncCurrentTeam
 // re-points the clock if the current pick changed owner. Returns the payload
 // so callers can emit it to additional rooms.
@@ -650,10 +650,12 @@ async function finalizeTradeExecution(
     }
   }
 
-  // Send full state sync to ensure all clients have accurate state
-  // (especially currentTeamId if the pick was traded)
-  const fullState = await manager.getFullState();
-  io.to(getRoomName(leagueId)).emit(SocketEvents.STATE_SYNC, fullState);
+  // Deliberately no STATE_SYNC here: the targeted events above carry
+  // everything a trade changes (picks, both rosters, and — via
+  // syncCurrentTeam's ON_THE_CLOCK — the clock). A full getFullState()
+  // snapshot is not transactionally consistent with concurrently committing
+  // picks, so broadcasting one here could overwrite a pick that landed while
+  // the snapshot was being read, blanking its board cell on every client.
 
   const description =
     log.activityType === 'TRADE_FORCED'
