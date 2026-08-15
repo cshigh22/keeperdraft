@@ -466,6 +466,7 @@ export default async function LeagueDetailPage({
                 tradeBlockEntries={tradeBlockData}
                 myPlayers={myPlayers}
                 leagueRosters={allLeagueRosters}
+                teams={league.teams.map((t) => ({ id: t.id, name: t.name }))}
                 isCommissioner={isCommissioner}
                 pendingIncomingCount={pendingIncomingCount}
                 pendingTradesTab={

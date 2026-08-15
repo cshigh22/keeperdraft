@@ -48,6 +48,9 @@ interface MarketplaceProps {
   tradeBlockEntries: TradeBlockPlayerData[];
   myPlayers: MyPlayer[];
   leagueRosters: GeneralRosterPlayer[];
+  // All league teams, not just those with rostered players — empty teams
+  // still need a card so the commissioner can add their first player
+  teams: { id: string; name: string }[];
   isCommissioner: boolean;
   // Rendered at the right end of the section header (e.g. Propose Trade)
   headerAction?: React.ReactNode;
@@ -108,6 +111,7 @@ export function Marketplace({
   tradeBlockEntries,
   myPlayers,
   leagueRosters,
+  teams,
   isCommissioner,
   headerAction,
   pendingTradesTab,
@@ -235,6 +239,15 @@ export function Marketplace({
   const rostersByTeam = useMemo(() => {
     const grouped: Record<string, { name: string; players: GeneralRosterPlayer[] }> = {};
     const search = rosterSearch.toLowerCase();
+    const hasActiveFilter = search !== '' || positionFilter !== 'ALL';
+
+    // With no filter active, seed every team so empty rosters still get a
+    // card — the commissioner's Add Player button lives on the team header
+    if (!hasActiveFilter) {
+      for (const team of teams) {
+        grouped[team.id] = { name: team.name, players: [] };
+      }
+    }
 
     for (const player of leagueRosters) {
       const matchesSearch = player.fullName.toLowerCase().includes(search);
@@ -249,7 +262,7 @@ export function Marketplace({
     }
 
     return grouped;
-  }, [leagueRosters, rosterSearch, positionFilter]);
+  }, [teams, leagueRosters, rosterSearch, positionFilter]);
 
   return (
     <div className="mt-8">
@@ -380,24 +393,26 @@ export function Marketplace({
               <div className="space-y-4">
                 {Object.entries(rostersByTeam).map(([teamId, data]) => (
                   <div key={teamId} className="border rounded-xl overflow-hidden bg-card/50">
-                    <button
-                      onClick={() => toggleTeam(teamId)}
-                      className="w-full flex items-center justify-between p-3 bg-muted/20 hover:bg-muted/30 transition-colors group/teamheader"
-                    >
-                      <div className="flex items-center gap-2">
+                    {/* Toggle and Add Player are sibling buttons — nesting the
+                        Button inside the toggle <button> is invalid HTML and
+                        breaks hydration */}
+                    <div className="w-full flex items-center justify-between bg-muted/20 hover:bg-muted/30 transition-colors group/teamheader">
+                      <button
+                        onClick={() => toggleTeam(teamId)}
+                        className="flex flex-1 items-center gap-2 p-3"
+                      >
                         {expandedTeams[teamId] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                         <span className="text-xs font-bold">{data.name}</span>
                         <Badge variant="outline" className="text-[9px] h-4 px-1.5">
                           {data.players.length} players
                         </Badge>
-                      </div>
+                      </button>
                       {isCommissioner && (
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-6 px-2 text-[10px] gap-1 opacity-0 group-hover/teamheader:opacity-100 transition-opacity bg-background/50 hover:bg-background"
-                          onClick={(e) => {
-                            e.stopPropagation();
+                          className="h-6 px-2 mr-3 text-[10px] gap-1 opacity-0 group-hover/teamheader:opacity-100 transition-opacity bg-background/50 hover:bg-background"
+                          onClick={() => {
                             setSearchTeamId(teamId);
                             setSearchDialogOpen(true);
                           }}
@@ -405,10 +420,15 @@ export function Marketplace({
                           <Plus className="w-3 h-3" /> Add Player
                         </Button>
                       )}
-                    </button>
+                    </div>
 
                     {expandedTeams[teamId] && (
                       <div className="p-2 space-y-1">
+                        {data.players.length === 0 && (
+                          <p className="text-[10px] text-muted-foreground text-center py-2">
+                            No players on this roster yet
+                          </p>
+                        )}
                         {data.players.map(p => (
                           <div key={p.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/40 transition-colors border border-transparent hover:border-border/30">
                             <PositionBadge position={p.position} />
