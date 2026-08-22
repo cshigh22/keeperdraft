@@ -101,6 +101,30 @@ interface TradeAsset {
 const FUTURE_PICK_PREFIX = 'FUTURE_PICK:';
 const FUTURE_YEARS_OFFERED = 3;
 
+// A pick row plus the keys needed to order it; kept separate from TradeAsset
+// so the UI type stays free of pick-specific fields.
+interface PickAssetEntry {
+  asset: TradeAsset;
+  season: number;
+  round: number;
+  pickInRound: number; // 0 for future-season picks (no board yet)
+  isOwn: boolean; // originalOwnerId === the team being listed
+  originalOwnerName: string; // '' for own picks
+}
+
+// Season asc → round asc → board slot (current season) → own pick before
+// acquired (future picks all have slot 0, so this is what orders them) →
+// original owner name → id. Fully deterministic so server order never leaks.
+function comparePickEntries(a: PickAssetEntry, b: PickAssetEntry): number {
+  if (a.season !== b.season) return a.season - b.season;
+  if (a.round !== b.round) return a.round - b.round;
+  if (a.pickInRound !== b.pickInRound) return a.pickInRound - b.pickInRound;
+  if (a.isOwn !== b.isOwn) return a.isOwn ? -1 : 1;
+  const byOwner = a.originalOwnerName.localeCompare(b.originalOwnerName);
+  if (byOwner !== 0) return byOwner;
+  return a.asset.id.localeCompare(b.asset.id);
+}
+
 function toProposalAsset(asset: TradeAsset): ProposalAsset {
   if (asset.id.startsWith(FUTURE_PICK_PREFIX)) {
     const [, , year, round] = asset.id.split(':');
@@ -277,9 +301,10 @@ export function TradeModal({
 
   const selectedTeam = otherTeams.find((t) => t.id === selectedTeamId);
 
-  // All tradeable assets for a team: owned picks, virtual future picks, and players
+  // All tradeable assets for a team: picks (sorted chronologically), then players
   const getTeamAssets = useCallback((teamId: string, players: PlayerSummary[]) => {
     const assets: TradeAsset[] = [];
+    const pickEntries: PickAssetEntry[] = [];
 
     // 1. Picks from allPicks owned by this team. "Future" is measured against
     // the league's season, not the calendar year — a December draft for next
@@ -289,17 +314,24 @@ export function TradeModal({
       .forEach((pick) => {
         const isFuture = pick.season > leagueSeason;
         const originalOwner = allTeams.find((t) => t.id === pick.originalOwnerId);
-        assets.push({
-          type: 'pick',
-          id: isFuture
-            ? `${FUTURE_PICK_PREFIX}${pick.originalOwnerId}:${pick.season}:${pick.round}`
-            : pick.id,
-          display: isFuture
-            ? `${pick.season} Round ${pick.round} Pick`
-            : `${pick.season} Round ${pick.round}, Pick ${pick.pickInRound}`,
-          subtext: pick.originalOwnerId !== pick.currentOwnerId
-            ? `Acquired via ${originalOwner?.ownerName || 'Trade'}`
-            : isFuture ? 'Future Draft Pick' : `Pick ${pick.overallPickNumber}`,
+        pickEntries.push({
+          asset: {
+            type: 'pick',
+            id: isFuture
+              ? `${FUTURE_PICK_PREFIX}${pick.originalOwnerId}:${pick.season}:${pick.round}`
+              : pick.id,
+            display: isFuture
+              ? `${pick.season} Round ${pick.round} Pick`
+              : `${pick.season} Round ${pick.round}, Pick ${pick.pickInRound}`,
+            subtext: pick.originalOwnerId !== pick.currentOwnerId
+              ? `Acquired via ${originalOwner?.ownerName || 'Trade'}`
+              : isFuture ? 'Future Draft Pick' : `Pick ${pick.overallPickNumber}`,
+          },
+          season: pick.season,
+          round: pick.round,
+          pickInRound: pick.pickInRound,
+          isOwn: pick.originalOwnerId === teamId,
+          originalOwnerName: originalOwner?.ownerName ?? '',
         });
       });
 
@@ -312,15 +344,26 @@ export function TradeModal({
         );
 
         if (!isRepresented) {
-          assets.push({
-            type: 'pick',
-            id: `${FUTURE_PICK_PREFIX}${teamId}:${year}:${round}`,
-            display: `${year} Round ${round} Pick`,
-            subtext: `Future Draft Pick`,
+          pickEntries.push({
+            asset: {
+              type: 'pick',
+              id: `${FUTURE_PICK_PREFIX}${teamId}:${year}:${round}`,
+              display: `${year} Round ${round} Pick`,
+              subtext: `Future Draft Pick`,
+            },
+            season: year,
+            round,
+            pickInRound: 0,
+            isOwn: true,
+            originalOwnerName: '',
           });
         }
       }
     }
+
+    // Picks first, in chronological order; players keep their incoming order.
+    pickEntries.sort(comparePickEntries);
+    for (const entry of pickEntries) assets.push(entry.asset);
 
     // 3. Players
     players.forEach((player) => {
