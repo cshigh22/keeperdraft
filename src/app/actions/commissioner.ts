@@ -98,7 +98,9 @@ export async function getDraftSettingsAction(leagueId: string) {
 export async function updatePlayerRankingsAction(leagueId: string) {
     try {
         await requireCommissioner(leagueId);
-        const result = await updateRankingsFromFantasyCalc(false, 1, 12);
+        // KeeperDraft is a keeper league, so dynasty rankings (long-term
+        // value, not just this season) are the right default — not redraft.
+        const result = await updateRankingsFromFantasyCalc(true, 1, 12);
         return {
             success: result.success,
             data: {
