@@ -9,6 +9,7 @@ import type {
   TradeOfferedPayload,
 } from '@/types/socket';
 import { getRosterFeasibility } from '@/lib/roster-restrictions';
+import { ROSTERED_PLAYER_WHERE } from '@/lib/roster-membership';
 import { toTeamSummary, toTradeAssetPayload } from './mappers';
 
 // ============================================================================
@@ -497,7 +498,7 @@ export class TradeProcessor {
 
     const evaluate = async (self: TradeSideAssets, other: TradeSideAssets): Promise<void> => {
       const rosterEntries = await this.prisma.playerRoster.findMany({
-        where: { leagueId, teamId: self.teamId, acquiredVia: { not: 'FREE_AGENT' } },
+        where: { leagueId, teamId: self.teamId, ...ROSTERED_PLAYER_WHERE },
         select: { playerId: true, player: { select: { position: true } } },
       });
 

@@ -11,6 +11,7 @@ import type {
 import { toPlayerSummary, toTeamSummary, toTradeAssetPayload } from './mappers';
 import { buildTradeMap, generatePickSlots } from './draft-pick-generator';
 import { getRestrictedPositions, normalizePosition } from '@/lib/roster-restrictions';
+import { ROSTERED_PLAYER_WHERE, isRosteredEntry } from '@/lib/roster-membership';
 import type { Server } from 'socket.io';
 import type {
   ServerToClientEvents,
@@ -285,7 +286,7 @@ export class DraftStateManager {
 
   async getTeamRoster(teamId: string): Promise<RosterPlayer[]> {
     const rosters = await this.prisma.playerRoster.findMany({
-      where: { leagueId: this.leagueId, teamId, acquiredVia: { not: 'FREE_AGENT' } },
+      where: { leagueId: this.leagueId, teamId, ...ROSTERED_PLAYER_WHERE },
       include: { player: true },
     });
 
@@ -340,7 +341,7 @@ export class DraftStateManager {
 
   private async getTeamRosters(): Promise<Record<string, RosterPlayer[]>> {
     const rosters = await this.prisma.playerRoster.findMany({
-      where: { leagueId: this.leagueId, acquiredVia: { not: 'FREE_AGENT' } },
+      where: { leagueId: this.leagueId, ...ROSTERED_PLAYER_WHERE },
       include: { player: true },
     });
 
@@ -383,7 +384,7 @@ export class DraftStateManager {
     // Exclude only keepers and draft-acquired players — not pre-draft marketplace entries (FREE_AGENT)
     const keeperTeamByPlayerId = new Map<string, string>();
     for (const entry of allRosteredPlayers) {
-      if (entry.isKeeper || entry.acquiredVia !== 'FREE_AGENT') {
+      if (isRosteredEntry(entry)) {
         excludeIds.add(entry.playerId);
       }
       if (entry.isKeeper) {
@@ -1365,7 +1366,7 @@ export class DraftStateManager {
         where: {
           leagueId: this.leagueId,
           playerId,
-          acquiredVia: { not: 'FREE_AGENT' },
+          ...ROSTERED_PLAYER_WHERE,
         },
       }),
     ]);
@@ -1406,7 +1407,7 @@ export class DraftStateManager {
         where: {
           leagueId: this.leagueId,
           teamId,
-          acquiredVia: { not: 'FREE_AGENT' },
+          ...ROSTERED_PLAYER_WHERE,
         },
         include: { player: { select: { position: true } } },
       }),

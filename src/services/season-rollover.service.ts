@@ -5,6 +5,7 @@
 
 import { prisma } from '@/lib/prisma';
 import { generatePickSlots } from '@/server/draft-pick-generator';
+import { ROSTERED_PLAYER_WHERE } from '@/lib/roster-membership';
 
 export interface RolloverSeasonInput {
   leagueId: string;
@@ -68,10 +69,10 @@ export async function rolloverSeason(input: RolloverSeasonInput): Promise<Rollov
         throw new Error('This league has already been rolled over to a new season');
       }
 
-      // 1. Archive final rosters. FREE_AGENT rows are pre-draft marketplace
-      // signals, not rostered players — skipped and left in place.
+      // 1. Archive final rosters. Non-keeper FREE_AGENT rows are pre-draft
+      // marketplace signals, not rostered players — skipped and left in place.
       const rosters = await tx.playerRoster.findMany({
-        where: { leagueId, acquiredVia: { not: 'FREE_AGENT' } },
+        where: { leagueId, ...ROSTERED_PLAYER_WHERE },
         include: {
           player: { select: { fullName: true, position: true, nflTeam: true } },
           team: { select: { name: true } },
