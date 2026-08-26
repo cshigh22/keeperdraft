@@ -4,7 +4,7 @@
 'use client';
 
 import React, { useState, useMemo, useCallback } from 'react';
-import { cn } from '@/lib/utils';
+import { cn, normalizeForSearch } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -186,11 +186,11 @@ export function PlayerQueue({
 
     // Search filter
     if (search.trim()) {
-      const searchLower = search.toLowerCase();
+      const s = normalizeForSearch(search);
       result = result.filter(
         (p) =>
-          p.fullName.toLowerCase().includes(searchLower) ||
-          p.nflTeam?.toLowerCase().includes(searchLower)
+          normalizeForSearch(p.fullName).includes(s) ||
+          (p.nflTeam && normalizeForSearch(p.nflTeam).includes(s))
       );
     }
 

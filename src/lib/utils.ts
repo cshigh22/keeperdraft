@@ -9,6 +9,19 @@ export function cn(...inputs: ClassValue[]): string {
 }
 
 /**
+ * Normalize a string for fuzzy name matching: lowercase, strip diacritics,
+ * drop everything non-alphanumeric (spaces included, so "amon ra" matches
+ * "Amon-Ra" and "Dezhaun" matches "De'Zhaun").
+ */
+export function normalizeForSearch(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+/**
  * Format seconds to MM:SS display
  */
 export function formatTime(seconds: number): string {

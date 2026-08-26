@@ -5,7 +5,7 @@
 
 import React, { useState, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { cn } from '@/lib/utils';
+import { cn, normalizeForSearch } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Search, Star, GripVertical } from 'lucide-react';
@@ -130,8 +130,8 @@ export function PlayerPool({
         let result = players.filter(p => !p.keptByTeam);
 
         if (search.trim()) {
-            const s = search.toLowerCase();
-            result = result.filter(p => p.fullName.toLowerCase().includes(s));
+            const s = normalizeForSearch(search);
+            result = result.filter(p => normalizeForSearch(p.fullName).includes(s));
         }
 
         if (positionFilter !== 'ALL') {
