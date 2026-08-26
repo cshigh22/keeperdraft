@@ -17,6 +17,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { DraftBoard } from '@/components/draft/DraftBoard';
+import { EditPickDialog } from '@/components/draft/EditPickDialog';
 import { PlayerPool } from '@/components/draft/PlayerPool';
 import { SidebarRoster } from '@/components/draft/SidebarRoster';
 import { DraftTimer } from '@/components/draft/DraftTimer';
@@ -43,7 +44,7 @@ import {
   Search,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { TradeAcceptedPayload, TradeOfferedPayload } from '@/types/socket';
+import type { DraftPickSummary, TradeAcceptedPayload, TradeOfferedPayload } from '@/types/socket';
 import { revalidateLeague } from '@/app/actions/league';
 
 // ============================================================================
@@ -102,6 +103,7 @@ function DraftRoomContent() {
   const [incomingTrade, setIncomingTrade] = useState<TradeOfferedPayload | null>(null);
   const [completedTrade, setCompletedTrade] = useState<TradeAcceptedPayload | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [editingPick, setEditingPick] = useState<DraftPickSummary | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('players');
   const [selectedRosterTeamId, setSelectedRosterTeamId] = useState<string | undefined>(undefined);
@@ -398,6 +400,8 @@ function DraftRoomContent() {
               setSelectedRosterTeamId(teamId);
               setSidebarTab('roster');
             }}
+            canEditPicks={userTeam.isCommissioner && state.status === 'COMPLETED'}
+            onEditPick={setEditingPick}
           />
         </div>
 
@@ -452,6 +456,19 @@ function DraftRoomContent() {
           </Tabs>
         </div>
       </main>
+
+      {/* Commissioner post-draft pick editing */}
+      <EditPickDialog
+        pick={editingPick}
+        players={state.availablePlayers}
+        onConfirm={async (playerId) => {
+          if (!editingPick) return;
+          actions.editPick(editingPick.id, playerId);
+          setEditingPick(null);
+          await revalidateLeague(leagueId);
+        }}
+        onClose={() => setEditingPick(null)}
+      />
 
       {/* Trade Completed Announcement */}
       {completedTrade && (

@@ -336,6 +336,22 @@ function registerDraftControlHandlers(socket: DraftSocket): void {
     }
   });
 
+  socket.on(SocketEvents.EDIT_PICK, async ({ leagueId, pickId, playerId }) => {
+    if (!requireCommissioner(socket, leagueId, 'edit completed picks')) return;
+
+    try {
+      await getDraftManager(leagueId).editCompletedPick(pickId, playerId, socket.data.userId!);
+    } catch (error) {
+      console.error('Error editing pick:', error);
+      // P2002: the roster unique constraint lost a race with a concurrent add
+      const message =
+        (error as { code?: string })?.code === 'P2002'
+          ? 'That player was just added to a roster by someone else'
+          : errorMessage(error, 'Failed to edit pick');
+      emitError(socket, 'EDIT_PICK_FAILED', message);
+    }
+  });
+
   socket.on(SocketEvents.ORDER_UPDATED, async ({ leagueId, teamOrder }) => {
     if (!requireCommissioner(socket, leagueId, 'update the draft order')) return;
 

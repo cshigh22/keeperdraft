@@ -12,6 +12,7 @@ import type {
   StateSyncPayload,
   PickMadePayload,
   PickUndonePayload,
+  PickEditedPayload,
   TimerTickPayload,
   TradeOfferedPayload,
   TradeAcceptedPayload,
@@ -94,6 +95,7 @@ interface UseDraftSocketReturn {
     resetDraft: () => void;
     forcePick: (playerId: string) => void;
     undoLastPick: () => void;
+    editPick: (pickId: string, playerId: string) => void;
     updateOrder: (teamOrder: string[]) => void;
     updateQueue: (teamId: string, playerIds: string[]) => void;
     toggleQueue: (teamId: string, playerId: string) => void;
@@ -221,6 +223,44 @@ function applyPickUndone(prev: DraftState, payload: PickUndonePayload): DraftSta
     currentTeamId: payload.revertedToTeamId,
     teamRosters: mergeRosterUpdates(prev.teamRosters, payload.teamRosterUpdates),
     allPicks: prev.allPicks.map((p) => (p.id === payload.pickId ? clearPickSelection(p) : p)),
+    lastUpdate: new Date(),
+  };
+}
+
+// Commissioner swapped the player on a completed pick post-draft: update the
+// board slot, the owning team's roster, and pool/queue membership for both
+// players. Status and clock fields are deliberately untouched.
+function applyPickEdited(prev: DraftState, payload: PickEditedPayload): DraftState {
+  const teamQueues: Record<string, PlayerSummary[]> = {};
+  for (const [queueTeamId, queue] of Object.entries(prev.teamQueues)) {
+    teamQueues[queueTeamId] = queue.filter((p) => p.id !== payload.newPlayer.id);
+  }
+
+  // Replace in place: completedPicks stays ordered by pick number, and the
+  // optimistic undo path reads its last element as the most recent pick.
+  const editedIndex = prev.completedPicks.findIndex(
+    (p) =>
+      p.id === payload.pick.id ||
+      (p.season === payload.pick.season && p.overallPickNumber === payload.pick.overallPickNumber)
+  );
+
+  return {
+    ...prev,
+    completedPicks:
+      editedIndex === -1
+        ? [...prev.completedPicks, payload.pick]
+        : prev.completedPicks.map((p, i) => (i === editedIndex ? payload.pick : p)),
+    allPicks: upsertPickIntoSlot(prev.allPicks, payload.pick, payload.pick.overallPickNumber),
+    // Return the outgoing player to the pool (sorted by rank, like undo) and
+    // drop the incoming one; both filters also make redelivery idempotent.
+    availablePlayers: [
+      ...prev.availablePlayers.filter(
+        (p) => p.id !== payload.newPlayer.id && p.id !== payload.previousPlayer.id
+      ),
+      { ...payload.previousPlayer, keptByTeam: null },
+    ].sort((a, b) => (a.rank || 9999) - (b.rank || 9999)),
+    teamRosters: mergeRosterUpdates(prev.teamRosters, payload.teamRosterUpdates),
+    teamQueues,
     lastUpdate: new Date(),
   };
 }
@@ -595,6 +635,10 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       setState((prev) => applyPickUndone(prev, payload));
     });
 
+    socket.on(SocketEvents.PICK_EDITED, (payload) => {
+      setState((prev) => applyPickEdited(prev, payload));
+    });
+
     // Player taken (backup event)
     socket.on(SocketEvents.PLAYER_TAKEN, (payload) => {
       // Guard against potential undefined payload issues
@@ -891,6 +935,16 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
     socketRef.current.emit(SocketEvents.PICK_UNDONE, { leagueId });
   }, [leagueId]);
 
+  // Commissioner post-draft pick edit. No optimistic update: it's a rare
+  // corrective action and the PICK_EDITED broadcast is authoritative.
+  const editPick = useCallback(
+    (pickId: string, playerId: string) => {
+      if (!socketRef.current) return;
+      socketRef.current.emit(SocketEvents.EDIT_PICK, { leagueId, pickId, playerId });
+    },
+    [leagueId]
+  );
+
   const updateOrder = useCallback(
     (teamOrder: string[]) => {
       if (!socketRef.current) return;
@@ -1017,6 +1071,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       resetDraft,
       forcePick,
       undoLastPick,
+      editPick,
       updateOrder,
       updateQueue,
       toggleQueue,
@@ -1035,6 +1090,7 @@ export function useDraftSocket(options: UseDraftSocketOptions): UseDraftSocketRe
       resetDraft,
       forcePick,
       undoLastPick,
+      editPick,
       updateOrder,
       updateQueue,
       toggleQueue,

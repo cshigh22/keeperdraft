@@ -36,6 +36,10 @@ interface DraftBoardProps {
   // rendered so draft history stays visible
   hideKeeperRounds?: boolean;
   onTeamClick?: (teamId: string) => void;
+  // Commissioner post-draft pick editing: filled non-keeper cells become
+  // clickable and open the swap dialog
+  canEditPicks?: boolean;
+  onEditPick?: (pick: DraftPickSummary) => void;
 }
 
 interface PickCellProps {
@@ -47,6 +51,8 @@ interface PickCellProps {
   isPaused: boolean;
   isMyTeam: boolean;
   isTraded: boolean;
+  isEditable: boolean;
+  onEdit?: () => void;
 }
 
 // ============================================================================
@@ -91,6 +97,8 @@ const PickCell = React.memo(function PickCell({
   isPaused,
   isMyTeam,
   isTraded,
+  isEditable,
+  onEdit,
 }: PickCellProps) {
   const isFilled = pick?.isComplete && pick.selectedPlayer;
   const positionStyle = isFilled ? getPositionStyle(pick.selectedPlayer?.position) : null;
@@ -108,6 +116,7 @@ const PickCell = React.memo(function PickCell({
       <TooltipTrigger asChild>
         <div
           ref={cellRef}
+          onClick={isEditable ? onEdit : undefined}
           className={cn(
             'relative h-[68px] min-w-[130px] rounded-md border transition-all duration-200',
             'flex flex-col justify-between p-1.5',
@@ -122,7 +131,9 @@ const PickCell = React.memo(function PickCell({
             // My team highlight
             isMyTeam && !isFilled && 'border-blue-500/30 bg-blue-500/5',
             // Traded pick indicator
-            isTraded && 'border-dashed'
+            isTraded && 'border-dashed',
+            // Commissioner post-draft edit affordance
+            isEditable && 'cursor-pointer hover:ring-1 hover:ring-blue-400'
           )}
         >
           {/* Pick number badge */}
@@ -198,6 +209,11 @@ const PickCell = React.memo(function PickCell({
               Originally: Traded
             </p>
           )}
+          {isEditable && (
+            <p className="text-xs text-blue-600 mt-1">
+              Click to edit this pick
+            </p>
+          )}
         </div>
       </TooltipContent>
     </Tooltip>
@@ -207,10 +223,12 @@ const PickCell = React.memo(function PickCell({
   return (
     prevProps.pick?.isComplete === nextProps.pick?.isComplete &&
     prevProps.pick?.selectedPlayer?.id === nextProps.pick?.selectedPlayer?.id &&
+    prevProps.pick?.currentOwnerName === nextProps.pick?.currentOwnerName &&
     prevProps.isCurrentPick === nextProps.isCurrentPick &&
     prevProps.isPaused === nextProps.isPaused &&
     prevProps.isMyTeam === nextProps.isMyTeam &&
     prevProps.isTraded === nextProps.isTraded &&
+    prevProps.isEditable === nextProps.isEditable &&
     prevProps.pickNumber === nextProps.pickNumber &&
     prevProps.team.id === nextProps.team.id
   );
@@ -227,6 +245,8 @@ export function DraftBoard({
   draftType,
   myTeamId,
   onTeamClick,
+  canEditPicks,
+  onEditPick,
 }: DraftBoardProps) {
   const fullPickMap = useMemo(() => {
     const map = new Map<number, DraftPickSummary>();
@@ -365,6 +385,8 @@ export function DraftBoard({
                     const isTraded = pick
                       ? pick.originalOwnerId !== pick.currentOwnerId
                       : false;
+                    const isEditable =
+                      !!canEditPicks && !!pick?.isComplete && !!pick.selectedPlayer && !pick.isKeeper;
 
                     return (
                       <div key={`${round}-${teamIndex}`} className="min-w-[130px] flex-1">
@@ -377,6 +399,8 @@ export function DraftBoard({
                           isPaused={isPaused}
                           isMyTeam={team.id === myTeamId}
                           isTraded={isTraded}
+                          isEditable={isEditable}
+                          onEdit={isEditable && onEditPick ? () => onEditPick(pick!) : undefined}
                         />
                       </div>
                     );

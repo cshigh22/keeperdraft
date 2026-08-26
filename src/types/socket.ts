@@ -30,6 +30,8 @@ export const SocketEvents = {
   PICK_UNDONE: 'pick_undone',
   ON_THE_CLOCK: 'on_the_clock',
   FORCE_PICK: 'force_pick',
+  EDIT_PICK: 'edit_pick',
+  PICK_EDITED: 'pick_edited',
 
   // Trade events
   TRADE_OFFERED: 'trade_offered',
@@ -193,6 +195,20 @@ export interface PickUndonePayload {
   timestamp: string;
 }
 
+// Completed pick edited by the commissioner post-draft (player swap)
+export interface PickEditedPayload {
+  leagueId: string;
+  // The updated row; selectedPlayer is the incoming player
+  pick: DraftPickSummary;
+  // Swapped out — returns to the available pool
+  previousPlayer: PlayerSummary;
+  // Swapped in — leaves the pool and every queue
+  newPlayer: PlayerSummary;
+  teamId: string;
+  teamRosterUpdates?: Record<string, RosterPlayer[]>;
+  timestamp: string;
+}
+
 // On the clock
 export interface OnTheClockPayload {
   leagueId: string;
@@ -326,6 +342,7 @@ export interface ClientToServerEvents {
   [SocketEvents.DRAFT_RESUME]: (payload: { leagueId: string }) => void;
   [SocketEvents.DRAFT_RESET]: (payload: { leagueId: string }) => void;
   [SocketEvents.FORCE_PICK]: (payload: { leagueId: string; playerId: string }) => void;
+  [SocketEvents.EDIT_PICK]: (payload: { leagueId: string; pickId: string; playerId: string }) => void;
   [SocketEvents.PICK_UNDONE]: (payload: { leagueId: string }) => void;
   [SocketEvents.ORDER_UPDATED]: (payload: { leagueId: string; teamOrder: string[] }) => void;
 
@@ -370,6 +387,7 @@ export interface ServerToClientEvents {
   [SocketEvents.TIMER_EXPIRED]: (payload: { leagueId: string; teamId: string; pickNumber: number }) => void;
   [SocketEvents.PICK_MADE]: (payload: PickMadePayload) => void;
   [SocketEvents.PICK_UNDONE]: (payload: PickUndonePayload) => void;
+  [SocketEvents.PICK_EDITED]: (payload: PickEditedPayload) => void;
   [SocketEvents.ON_THE_CLOCK]: (payload: OnTheClockPayload) => void;
   [SocketEvents.PLAYER_TAKEN]: (payload: { leagueId: string; playerId: string; teamId: string }) => void;
   [SocketEvents.TRADE_OFFERED]: (payload: TradeOfferedPayload) => void;
