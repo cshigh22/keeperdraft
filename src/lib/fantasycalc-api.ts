@@ -3,7 +3,6 @@
 
 import { prisma } from './prisma';
 import { SleeperAPI } from './sleeper-api';
-import { UNRANKED_RANK } from './rank';
 
 // ============================================================================
 // TYPES
@@ -73,7 +72,14 @@ export async function fetchFantasyCalcRankings(
 /**
  * Update player rankings in the database using FantasyCalc data.
  * Matches players by Sleeper ID for accuracy.
- * 
+ *
+ * This is an OVERLAY: only players FantasyCalc covers are touched. Everyone
+ * else keeps the Sleeper search_rank baseline written by the player sync, so
+ * unranked-by-FantasyCalc players still order sensibly instead of tying at
+ * the unranked sentinel. Run "Sync Players from Sleeper" first (it restores
+ * the baseline and adds new players), then this — the sync overwrites rank
+ * with search_rank, so syncing after clobbers FantasyCalc ranks.
+ *
  * This should be run before a draft (e.g. night before or morning of).
  * Rankings will be reflected on the next state sync in a live draft.
  */
@@ -98,16 +104,8 @@ export async function updateRankingsFromFantasyCalc(
     result.totalFetched = rankings.length;
     console.log(`[FantasyCalc] Fetched ${rankings.length} player rankings`);
 
-    // Step 1: Reset all ranks to unranked so players not covered by any
-    // source below sink to the bottom
-    await prisma.player.updateMany({
-      data: {
-        rank: UNRANKED_RANK,
-        positionRank: null,
-      },
-    });
-
-    // Step 2: Update each ranked player by matching on sleeperId
+    // Update each ranked player by matching on sleeperId. Deliberately no
+    // reset of everyone else: their Sleeper search_rank baseline must survive.
     let batchUpdates = 0;
     let maxOverallRank = rankings.length;
     for (const entry of rankings) {
@@ -139,7 +137,7 @@ export async function updateRankingsFromFantasyCalc(
       }
     }
 
-    // Step 3: FantasyCalc has no K/DEF rankings, so rank them by last
+    // FantasyCalc has no K/DEF rankings, so rank them by last
     // season's standard fantasy points from Sleeper, continuing the overall
     // numbering after FantasyCalc's list. Failures here keep the FC ranks.
     try {

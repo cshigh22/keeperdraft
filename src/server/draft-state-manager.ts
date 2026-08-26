@@ -392,9 +392,20 @@ export class DraftStateManager {
       }
     }
 
-    // Sort with nulls last so ranked players come before unranked ones
+    // Only current-NFL players belong in the pool: without these filters,
+    // ~2k retired and team-less rows crowd active players out of the capped
+    // window. Sleeper marks both unsigned free agents AND never-flagged
+    // retirees as ACTIVE with no team, and its search_rank is popularity
+    // (it ranks retired legends above starters) — so a team-less player is
+    // admitted only when FantasyCalc ranked them (positionRank is only ever
+    // written by the rankings update). That lets signable free agents in and
+    // keeps retired ghosts out. The cap stays as a safety valve.
     const players = await this.prisma.player.findMany({
-      where: { id: { notIn: Array.from(excludeIds) } },
+      where: {
+        id: { notIn: Array.from(excludeIds) },
+        status: { in: ['ACTIVE', 'INJURED_RESERVE'] },
+        OR: [{ nflTeam: { not: null } }, { positionRank: { not: null } }],
+      },
       orderBy: [{ rank: { sort: 'asc', nulls: 'last' } }, { fullName: 'asc' }],
       take: 2000,
     });
