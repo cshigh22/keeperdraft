@@ -374,7 +374,8 @@ enum AcquisitionType {
   DRAFTED
   TRADED
   KEEPER
-  FREE_AGENT
+  FREE_AGENT // pre-draft marketplace signal, NOT rostered — see src/lib/roster-membership.ts
+  PICKUP // post-draft free-agent signing; counts as rostered
 }
 
 enum TradeStatus {

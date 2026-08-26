@@ -20,6 +20,8 @@ import { LegacyVault } from "@/components/champions/LegacyVault";
 import { Marketplace } from "@/components/marketplace/Marketplace";
 import type { PastWinnerData, KeeperHighlight } from "@/types/champions";
 import type { TradeBlockPlayerData, GeneralRosterPlayer } from "@/types/marketplace";
+import { isRosteredEntry } from "@/lib/roster-membership";
+import { totalRosterSlots } from "@/lib/roster-restrictions";
 
 export const dynamic = "force-dynamic";
 
@@ -151,9 +153,14 @@ export default async function LeagueDetailPage({
         blockedPlayerIdsByTeam.set(entry.teamId, blockedIds);
     }
 
+    // Post-draft, leftover pre-draft signal rows (acquiredVia FREE_AGENT,
+    // non-keeper) are free agents, not rostered players — without this filter
+    // a player could show on a team's roster and in the free agent list at once.
     const allLeagueRosters: GeneralRosterPlayer[] = league.teams.flatMap((team) => {
         const teamBlockedIds = blockedPlayerIdsByTeam.get(team.id) ?? new Set<string>();
-        return team.players.map((entry) => ({
+        const visibleEntries =
+            draftStatus === "COMPLETED" ? team.players.filter(isRosteredEntry) : team.players;
+        return visibleEntries.map((entry) => ({
             id: entry.player.id,
             entryId: entry.id,
             fullName: entry.player.fullName,
@@ -172,6 +179,11 @@ export default async function LeagueDetailPage({
     const myPlayers = myTeamId
         ? allLeagueRosters.filter((player) => player.teamId === myTeamId)
         : [];
+
+    // Free agency roster-cap inputs. Count only truly-rostered rows — sentinel
+    // signal rows must not eat roster spots.
+    const maxRosterSize = league.draftSettings ? totalRosterSlots(league.draftSettings) : null;
+    const myRosteredCount = myTeam ? myTeam.players.filter(isRosteredEntry).length : 0;
 
     // ========================================================================
     // TRADE PROPOSAL DATA (mirrors the draft room's socket state shapes)
@@ -468,6 +480,9 @@ export default async function LeagueDetailPage({
                 leagueRosters={allLeagueRosters}
                 teams={league.teams.map((t) => ({ id: t.id, name: t.name }))}
                 isCommissioner={isCommissioner}
+                draftStatus={draftStatus}
+                maxRosterSize={maxRosterSize}
+                myRosteredCount={myRosteredCount}
                 pendingIncomingCount={pendingIncomingCount}
                 pendingTradesTab={
                     <PendingTrades

@@ -2,6 +2,7 @@
 
 import { auth } from '@/auth';
 import { prisma } from '@/lib/prisma';
+import { isRosteredEntry } from '@/lib/roster-membership';
 import { revalidatePath } from 'next/cache';
 
 /**
@@ -67,25 +68,42 @@ export async function addPlayerToTeamRoster(formData: FormData) {
     throw new Error('Team not found in this league');
   }
 
+  // Pre-draft, an add is a marketplace signal (FREE_AGENT, not rostered);
+  // post-draft it must count as a real roster spot or every downstream
+  // "rostered players" query ignores it.
+  const draftState = await prisma.draftState.findUnique({
+    where: { leagueId },
+    select: { status: true },
+  });
+  const isPostDraft = draftState?.status === 'COMPLETED';
+
   // Check if player is already on another roster in this league
   const existing = await prisma.playerRoster.findFirst({
     where: { leagueId, playerId },
     include: { team: { select: { name: true } } },
   });
 
-  if (existing) {
+  // A leftover pre-draft signal row isn't a rostered player, but it occupies
+  // the [leagueId, playerId] unique slot — replace it rather than refuse.
+  const blocksAdd = existing && (!isPostDraft || isRosteredEntry(existing));
+  if (blocksAdd) {
     throw new Error(`Player is already on ${existing.team.name}'s roster`);
   }
 
-  // Add to roster
-  await prisma.playerRoster.create({
-    data: {
-      leagueId,
-      teamId,
-      playerId,
-      acquiredVia: 'FREE_AGENT',
-      isKeeper: false,
-    },
+  await prisma.$transaction(async (tx) => {
+    if (existing) {
+      await tx.playerRoster.delete({ where: { id: existing.id } });
+      await tx.tradeBlockEntry.deleteMany({ where: { leagueId, playerId } });
+    }
+    await tx.playerRoster.create({
+      data: {
+        leagueId,
+        teamId,
+        playerId,
+        acquiredVia: isPostDraft ? 'PICKUP' : 'FREE_AGENT',
+        isKeeper: false,
+      },
+    });
   });
 
   revalidatePath(`/leagues/${leagueId}`);

@@ -19,6 +19,7 @@ import {
 import {
   Store,
   User,
+  UserPlus,
   Plus,
   Minus,
   Search,
@@ -32,6 +33,8 @@ import {
 import { TradeBlockCard } from './TradeBlockCard';
 import { addToTradeBlock, removeFromTradeBlock } from '@/app/actions/marketplace';
 import { searchGlobalPlayers, addPlayerToTeamRoster, removePlayerFromRoster } from '@/app/actions/roster';
+import { listAvailableFreeAgents, pickupFreeAgent, dropPlayer } from '@/app/actions/free-agency';
+import type { FreeAgentPlayer } from '@/app/actions/free-agency';
 import type { TradeBlockPlayerData, GeneralRosterPlayer } from '@/types/marketplace';
 
 // ============================================================================
@@ -52,6 +55,11 @@ interface MarketplaceProps {
   // still need a card so the commissioner can add their first player
   teams: { id: string; name: string }[];
   isCommissioner: boolean;
+  // Free agency opens once the draft completes; the cap inputs drive the
+  // "roster full, drop someone" flow (null when the league has no settings)
+  draftStatus: string;
+  maxRosterSize: number | null;
+  myRosteredCount: number;
   // Rendered at the right end of the section header (e.g. Propose Trade)
   headerAction?: React.ReactNode;
   // Content of the Pending Trades tab (built by the league page, which owns
@@ -113,6 +121,9 @@ export function Marketplace({
   leagueRosters,
   teams,
   isCommissioner,
+  draftStatus,
+  maxRosterSize,
+  myRosteredCount,
   headerAction,
   pendingTradesTab,
   pendingIncomingCount = 0,
@@ -133,6 +144,24 @@ export function Marketplace({
   // Remove player confirmation
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
   const [pendingRemoveEntryId, setPendingRemoveEntryId] = useState<string | null>(null);
+
+  // Free agent tab (loaded lazily on first tab activation)
+  const [faQuery, setFaQuery] = useState('');
+  const [faPosition, setFaPosition] = useState<string>('ALL');
+  const [faResults, setFaResults] = useState<FreeAgentPlayer[]>([]);
+  const [faLoading, setFaLoading] = useState(false);
+  const [faLoaded, setFaLoaded] = useState(false);
+
+  // Roster-full pickup flow: pick a player to drop before the add goes through
+  const [dropForPickupOpen, setDropForPickupOpen] = useState(false);
+  const [pendingPickup, setPendingPickup] = useState<FreeAgentPlayer | null>(null);
+
+  // My Status drop confirmation (separate from the commissioner remove flow)
+  const [dropConfirmOpen, setDropConfirmOpen] = useState(false);
+  const [pendingDrop, setPendingDrop] = useState<MyPlayer | null>(null);
+
+  const freeAgencyOpen = draftStatus === 'COMPLETED';
+  const rosterFull = maxRosterSize !== null && myRosteredCount >= maxRosterSize;
 
   // Error state (auto-dismisses after 5s)
   const [error, setError] = useState<string | null>(null);
@@ -194,6 +223,97 @@ export function Marketplace({
         await removePlayerFromRoster(formData);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to remove player from roster.');
+      }
+    });
+  };
+
+  const loadFreeAgents = async (query: string, position: string) => {
+    setFaLoading(true);
+    try {
+      const result = await listAvailableFreeAgents(leagueId, { query, position });
+      if (result.success) {
+        setFaResults(result.data);
+      } else {
+        setFaResults([]);
+        setError(result.error);
+      }
+    } catch {
+      setFaResults([]);
+      setError('Failed to load free agents. Please try again.');
+    } finally {
+      setFaLoading(false);
+    }
+  };
+
+  const handleTabChange = (value: string) => {
+    if (value === 'freeagents' && !faLoaded) {
+      setFaLoaded(true);
+      void loadFreeAgents(faQuery, faPosition);
+    }
+  };
+
+  const handleFaSearch = (query: string) => {
+    setFaQuery(query);
+    void loadFreeAgents(query, faPosition);
+  };
+
+  const handleFaPositionChange = (position: string) => {
+    setFaPosition(position);
+    void loadFreeAgents(faQuery, position);
+  };
+
+  const executePickup = (playerId: string, dropRosterEntryId?: string) => {
+    if (!myTeamId || isPending) return;
+    const teamId = myTeamId;
+
+    startTransition(async () => {
+      try {
+        const result = await pickupFreeAgent({ leagueId, teamId, playerId, dropRosterEntryId });
+        if (!result.success) {
+          setError(result.error ?? 'Failed to pick up player.');
+        }
+        setDropForPickupOpen(false);
+        setPendingPickup(null);
+        // Either way the pool may have shifted (success, or someone beat us to it)
+        await loadFreeAgents(faQuery, faPosition);
+      } catch {
+        setError('Failed to pick up player. Please try again.');
+      }
+    });
+  };
+
+  const handlePickup = (player: FreeAgentPlayer) => {
+    if (rosterFull) {
+      setPendingPickup(player);
+      setDropForPickupOpen(true);
+      return;
+    }
+    executePickup(player.id);
+  };
+
+  const handleDropPlayer = (player: MyPlayer) => {
+    setPendingDrop(player);
+    setDropConfirmOpen(true);
+  };
+
+  const handleConfirmDrop = () => {
+    if (!pendingDrop || !myTeamId) return;
+    const teamId = myTeamId;
+    const rosterEntryId = pendingDrop.entryId;
+    setDropConfirmOpen(false);
+    setPendingDrop(null);
+
+    startTransition(async () => {
+      try {
+        const result = await dropPlayer({ leagueId, teamId, rosterEntryId });
+        if (!result.success) {
+          setError(result.error ?? 'Failed to drop player.');
+        } else if (faLoaded) {
+          // The dropped player is a free agent now — refresh the pool
+          await loadFreeAgents(faQuery, faPosition);
+        }
+      } catch {
+        setError('Failed to drop player. Please try again.');
       }
     });
   };
@@ -292,8 +412,15 @@ export function Marketplace({
       </div>
 
       {/* Main Tabs */}
-      <Tabs defaultValue="block" className="w-full">
-        <TabsList className={cn('w-full grid h-10', pendingTradesTab ? 'grid-cols-4' : 'grid-cols-3')}>
+      <Tabs defaultValue="block" className="w-full" onValueChange={handleTabChange}>
+        <TabsList
+          className={cn(
+            'w-full grid h-10',
+            { 3: 'grid-cols-3', 4: 'grid-cols-4', 5: 'grid-cols-5' }[
+              3 + (pendingTradesTab ? 1 : 0) + (freeAgencyOpen ? 1 : 0)
+            ]
+          )}
+        >
           <TabsTrigger value="block" className="text-xs gap-1.5">
             <Store className="w-3.5 h-3.5" />
             Trade Block
@@ -318,6 +445,12 @@ export function Marketplace({
             <Users className="w-3.5 h-3.5" />
             League Rosters
           </TabsTrigger>
+          {freeAgencyOpen && (
+            <TabsTrigger value="freeagents" className="text-xs gap-1.5">
+              <UserPlus className="w-3.5 h-3.5" />
+              Free Agents
+            </TabsTrigger>
+          )}
           <TabsTrigger value="status" className="text-xs gap-1.5">
             <User className="w-3.5 h-3.5" />
             My Status
@@ -476,6 +609,193 @@ export function Marketplace({
               </div>
             </ScrollArea>
         </TabsContent>
+
+        {/* ================================================================
+            TAB: FREE AGENTS (post-draft only)
+            ================================================================ */}
+        {freeAgencyOpen && (
+          <TabsContent value="freeagents" className="mt-4 space-y-4">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="relative flex-1">
+                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search free agents..."
+                  value={faQuery}
+                  onChange={(e) => handleFaSearch(e.target.value)}
+                  className="pl-9 h-9 text-xs"
+                />
+              </div>
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                {POSITIONS.map((pos) => (
+                  <button
+                    key={pos}
+                    onClick={() => handleFaPositionChange(pos)}
+                    className={cn(
+                      'text-[9px] font-bold px-2.5 py-1 rounded-full border transition-all shrink-0',
+                      faPosition === pos
+                        ? 'bg-primary text-primary-foreground border-primary'
+                        : 'bg-muted/30 text-muted-foreground border-border/50 hover:bg-muted/60'
+                    )}
+                  >
+                    {pos}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {faQuery.trim().length < 2 && (
+              <p className="text-[10px] text-muted-foreground">
+                Showing the top available players by rank. Search to find anyone else.
+              </p>
+            )}
+
+            <ScrollArea className="h-[500px] pr-4">
+              <div className="space-y-1.5">
+                {faLoading ? (
+                  <div className="text-center py-8 text-xs text-muted-foreground">
+                    Loading free agents...
+                  </div>
+                ) : faResults.length === 0 ? (
+                  <div className="text-center py-12 text-muted-foreground border border-dashed rounded-xl">
+                    <Search className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                    <p className="text-sm">No available players found</p>
+                  </div>
+                ) : (
+                  faResults.map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center gap-3 p-2.5 rounded-lg border bg-muted/20 border-border/30 hover:bg-muted/40 transition-all"
+                    >
+                      <PositionBadge position={p.position} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-medium truncate">{p.fullName}</span>
+                          {p.injuryStatus && (
+                            <Badge className="bg-red-500/15 text-red-500 border-red-500/20 text-[8px] h-3.5 px-1 font-bold uppercase tracking-tighter">
+                              {p.injuryStatus}
+                            </Badge>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-muted-foreground">
+                          {p.nflTeam || 'FA'} · Rank #{formatRank(p.rank)}
+                        </span>
+                      </div>
+                      <Button
+                        size="sm"
+                        className="h-7 text-[10px] gap-1"
+                        onClick={() => handlePickup(p)}
+                        disabled={isPending || !myTeamId}
+                      >
+                        <Plus className="w-3 h-3" /> Add
+                      </Button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+        )}
+
+        {/* Roster Full — pick a player to drop before the add goes through */}
+        <Dialog
+          open={dropForPickupOpen}
+          onOpenChange={(open) => {
+            setDropForPickupOpen(open);
+            if (!open) setPendingPickup(null);
+          }}
+        >
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <UserPlus className="w-5 h-5 text-indigo-500" />
+                Roster Full — Drop a Player
+              </DialogTitle>
+              <DialogDescription>
+                Your roster is full ({myRosteredCount}/{maxRosterSize}). Choose a player to drop
+                to make room for {pendingPickup?.fullName}. Dropping a keeper permanently clears
+                their keeper status.
+              </DialogDescription>
+            </DialogHeader>
+
+            <ScrollArea className="h-[300px] pr-4">
+              <div className="space-y-1.5">
+                {myPlayers.map((player) => (
+                  <div
+                    key={player.entryId}
+                    className="flex items-center gap-3 p-2 rounded-lg border border-border/40 hover:bg-muted/30"
+                  >
+                    <PositionBadge position={player.position} />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium truncate">{player.fullName}</span>
+                        {player.isKeeper && <KeeperBadge draftCost={player.draftCost} />}
+                      </div>
+                      <span className="text-[10px] text-muted-foreground">
+                        {player.nflTeam || 'FA'} · Rank #{formatRank(player.rank)}
+                      </span>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      className="h-7 text-[10px]"
+                      onClick={() => pendingPickup && executePickup(pendingPickup.id, player.entryId)}
+                      disabled={isPending}
+                    >
+                      Drop &amp; Add
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setDropForPickupOpen(false);
+                  setPendingPickup(null);
+                }}
+              >
+                Cancel
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Drop Player Confirmation Dialog (manager self-drop) */}
+        <Dialog
+          open={dropConfirmOpen}
+          onOpenChange={(open) => {
+            setDropConfirmOpen(open);
+            if (!open) setPendingDrop(null);
+          }}
+        >
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>Drop Player</DialogTitle>
+              <DialogDescription>
+                Drop {pendingDrop?.fullName}? They become a free agent immediately and any manager
+                can pick them up.
+                {pendingDrop?.isKeeper &&
+                  ' This player is a keeper — dropping them permanently clears their keeper status.'}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter className="gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setDropConfirmOpen(false);
+                  setPendingDrop(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button variant="destructive" onClick={handleConfirmDrop} disabled={isPending}>
+                Drop
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Remove Player Confirmation Dialog */}
         <Dialog open={removeConfirmOpen} onOpenChange={setRemoveConfirmOpen}>
@@ -644,6 +964,19 @@ export function Marketplace({
                             <Plus className="w-3 h-3" />
                           )}
                         </Button>
+
+                        {/* Drop to free agency (post-draft only) */}
+                        {freeAgencyOpen && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                            onClick={() => handleDropPlayer(player)}
+                            disabled={isPending}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
                       </div>
                     ))}
                   </div>
