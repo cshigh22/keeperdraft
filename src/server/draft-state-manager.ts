@@ -1084,12 +1084,14 @@ export class DraftStateManager {
     this.startTimer(timerDuration);
   }
 
-  // Commissioner corrective tool: swap the player on a completed, non-keeper
-  // pick after the draft has ended (e.g. the intended player was missing from
-  // the pool during the draft). DraftState is deliberately never written, so
-  // completion status, undo bookkeeping, and reset behavior are unaffected.
-  // Positional limits are not enforced — like commissioner trades, this is a
-  // repair escape hatch, and the swap is 1-for-1 so roster size is unchanged.
+  // Commissioner corrective tool: put any player on a non-keeper pick after
+  // the draft has ended — no swap-in eligibility constraint. A player who is
+  // already rostered is moved onto this pick (their old roster row and any
+  // board slot showing them are updated), and a slot emptied that way can be
+  // filled the same way. Keeper slots stay locked. DraftState is deliberately
+  // never written, so completion status, undo bookkeeping, and reset behavior
+  // are unaffected. Positional limits are not enforced — like commissioner
+  // trades, this is a repair escape hatch.
   async editCompletedPick(
     pickId: string,
     newPlayerId: string,
@@ -1100,9 +1102,10 @@ export class DraftStateManager {
       throw new Error('Picks can only be edited after the draft is complete');
     }
 
+    const season = await this.getLeagueSeason();
     const [pick, newPlayer] = await Promise.all([
       this.prisma.draftPick.findFirst({
-        where: { id: pickId, leagueId: this.leagueId, season: await this.getLeagueSeason() },
+        where: { id: pickId, leagueId: this.leagueId, season },
         include: {
           currentOwner: { include: { owner: { select: { name: true } } } },
         },
@@ -1112,9 +1115,6 @@ export class DraftStateManager {
 
     if (!pick) {
       throw new Error('Pick not found in this draft');
-    }
-    if (!pick.isComplete || !pick.selectedPlayerId) {
-      throw new Error('Only completed picks can be edited');
     }
     if (pick.isKeeper) {
       throw new Error('Keeper picks cannot be edited');
@@ -1127,81 +1127,125 @@ export class DraftStateManager {
     }
 
     const oldPlayerId = pick.selectedPlayerId;
-    const oldPlayer = await this.prisma.player.findUnique({ where: { id: oldPlayerId } });
-    if (!oldPlayer) {
-      throw new Error('The originally drafted player no longer exists');
-    }
+    const oldPlayer = oldPlayerId
+      ? await this.prisma.player.findUnique({ where: { id: oldPlayerId } })
+      : null;
 
-    // Friendly pre-check; the [leagueId, playerId] unique on PlayerRoster is
-    // the race-safe arbiter inside the transaction.
-    if (!(await this.isPlayerAvailable(newPlayerId))) {
-      throw new Error(`${newPlayer.fullName} is not available`);
-    }
+    type PickWithOwner = Prisma.DraftPickGetPayload<{
+      include: { currentOwner: { include: { owner: { select: { name: true } } } } };
+    }>;
+    let released = false;
+    let vacatedPickRow: PickWithOwner | null = null;
+    let incomingFromTeamId: string | null = null;
 
     await this.prisma.$transaction(async (tx) => {
-      // The drafted player must still sit on the pick's own team as the
-      // original DRAFTED row (mirrors undoLastPick's delete scoping). A row
-      // acquired any other way — traded back, dropped and re-signed as a
-      // PICKUP — is a separate acquisition this edit must not destroy:
-      // refuse rather than guess.
-      const outgoing = await tx.playerRoster.findFirst({
-        where: { leagueId: this.leagueId, playerId: oldPlayerId, acquiredVia: 'DRAFTED' },
-      });
-      if (!outgoing || outgoing.teamId !== pick.currentOwnerId) {
-        throw new Error(
-          `${oldPlayer.fullName} is no longer on ${pick.currentOwner.name}'s roster as this draft pick (traded, dropped, or re-acquired since), so this pick cannot be edited`
-        );
+      // Outgoing player: release only the original DRAFTED row on the pick's
+      // own team (mirrors undoLastPick's delete scoping). A row acquired any
+      // other way — traded back, dropped and re-signed as a PICKUP — is a
+      // separate acquisition this edit leaves alone.
+      if (oldPlayerId) {
+        const outgoing = await tx.playerRoster.findFirst({
+          where: {
+            leagueId: this.leagueId,
+            playerId: oldPlayerId,
+            teamId: pick.currentOwnerId,
+            acquiredVia: 'DRAFTED',
+          },
+        });
+        if (outgoing) {
+          await tx.playerRoster.delete({ where: { id: outgoing.id } });
+          await tx.tradeBlockEntry.deleteMany({
+            where: { leagueId: this.leagueId, playerId: oldPlayerId },
+          });
+          released = true;
+        }
       }
-      if (outgoing.isKeeper) {
-        throw new Error(
-          `${oldPlayer.fullName} has been declared a keeper — remove the keeper selection first`
-        );
-      }
 
-      await tx.playerRoster.delete({ where: { id: outgoing.id } });
-      await tx.tradeBlockEntry.deleteMany({
-        where: { leagueId: this.leagueId, playerId: oldPlayerId },
-      });
-
-      // selectedAt is preserved: this is an administrative correction, not a
-      // new selection.
-      await tx.draftPick.update({
-        where: { id: pick.id },
-        data: { selectedPlayerId: newPlayerId, isAutoPick: false, autoPickPlayerId: null },
-      });
-
-      // A pre-draft marketplace FREE_AGENT signal row may occupy the incoming
-      // player's [leagueId, playerId] slot (mirrors pickupFreeAgent)
-      await tx.playerRoster.deleteMany({
+      // If the incoming player already occupies another board slot, vacate it
+      // so no player shows on two picks — except keeper slots, which are
+      // never touched.
+      const otherPick = await tx.draftPick.findFirst({
         where: {
           leagueId: this.leagueId,
-          playerId: newPlayerId,
-          isKeeper: false,
-          acquiredVia: 'FREE_AGENT',
+          season,
+          selectedPlayerId: newPlayerId,
+          isComplete: true,
+          id: { not: pick.id },
+        },
+        include: {
+          currentOwner: { include: { owner: { select: { name: true } } } },
         },
       });
-      await tx.tradeBlockEntry.deleteMany({
-        where: { leagueId: this.leagueId, playerId: newPlayerId },
+      if (otherPick?.isKeeper) {
+        throw new Error(`${newPlayer.fullName} occupies a keeper slot, which cannot be changed`);
+      }
+      if (otherPick) {
+        await tx.draftPick.update({
+          where: { id: otherPick.id },
+          data: {
+            selectedPlayerId: null,
+            selectedAt: null,
+            isComplete: false,
+            isAutoPick: false,
+            autoPickPlayerId: null,
+          },
+        });
+        vacatedPickRow = otherPick;
+      }
+
+      // selectedAt is preserved on an existing selection (an administrative
+      // correction, not a new pick); a previously empty slot is stamped now.
+      await tx.draftPick.update({
+        where: { id: pick.id },
+        data: {
+          selectedPlayerId: newPlayerId,
+          isComplete: true,
+          isAutoPick: false,
+          autoPickPlayerId: null,
+          ...(pick.selectedAt ? {} : { selectedAt: new Date() }),
+        },
       });
 
-      // create, not upsert: if a concurrent pickup or edit claimed this player
-      // after the pre-check, the unique constraint fails loudly (P2002)
-      // instead of silently stealing a rostered player.
-      await tx.playerRoster.create({
-        data: {
+      // Whatever roster row the incoming player has — pre-draft FREE_AGENT
+      // signal, PICKUP, TRADED, or a spot on another team — becomes the
+      // drafted spot on the pick's team, exactly like makePick's upsert.
+      const incomingExisting = await tx.playerRoster.findUnique({
+        where: { leagueId_playerId: { leagueId: this.leagueId, playerId: newPlayerId } },
+      });
+      if (incomingExisting && incomingExisting.teamId !== pick.currentOwnerId) {
+        incomingFromTeamId = incomingExisting.teamId;
+      }
+      await tx.playerRoster.upsert({
+        where: { leagueId_playerId: { leagueId: this.leagueId, playerId: newPlayerId } },
+        create: {
           teamId: pick.currentOwnerId,
           playerId: newPlayerId,
           leagueId: this.leagueId,
           isKeeper: false,
           acquiredVia: 'DRAFTED',
         },
+        update: {
+          teamId: pick.currentOwnerId,
+          isKeeper: false,
+          acquiredVia: 'DRAFTED',
+        },
+      });
+      await tx.tradeBlockEntry.deleteMany({
+        where: { leagueId: this.leagueId, playerId: newPlayerId },
       });
     });
 
     this.clearStateCache();
 
-    const updatedRoster = await this.getTeamRoster(pick.currentOwnerId);
+    const affectedTeamIds = [
+      ...new Set([pick.currentOwnerId, incomingFromTeamId].filter((id): id is string => !!id)),
+    ];
+    const rosters = await Promise.all(affectedTeamIds.map((id) => this.getTeamRoster(id)));
+    const teamRosterUpdates = Object.fromEntries(
+      affectedTeamIds.map((id, i) => [id, rosters[i]!])
+    );
 
+    const vacated = vacatedPickRow as PickWithOwner | null;
     const payload: PickEditedPayload = {
       leagueId: this.leagueId,
       pick: {
@@ -1216,12 +1260,29 @@ export class DraftStateManager {
         isComplete: true,
         isKeeper: false,
         selectedPlayer: toPlayerSummary(newPlayer),
-        selectedAt: pick.selectedAt?.toISOString(),
+        selectedAt: (pick.selectedAt ?? new Date()).toISOString(),
       },
-      previousPlayer: toPlayerSummary(oldPlayer),
       newPlayer: toPlayerSummary(newPlayer),
+      previousPlayer: oldPlayer ? toPlayerSummary(oldPlayer) : undefined,
+      releasedPlayer: released && oldPlayer ? toPlayerSummary(oldPlayer) : undefined,
+      vacatedPick: vacated
+        ? {
+            id: vacated.id,
+            season: vacated.season,
+            round: vacated.round,
+            pickInRound: vacated.pickInRound || 0,
+            overallPickNumber: vacated.overallPickNumber || 0,
+            currentOwnerId: vacated.currentOwnerId,
+            currentOwnerName: vacated.currentOwner.owner?.name || 'Open Slot',
+            originalOwnerId: vacated.originalOwnerId,
+            isComplete: false,
+            isKeeper: false,
+            selectedPlayer: undefined,
+            selectedAt: undefined,
+          }
+        : undefined,
       teamId: pick.currentOwnerId,
-      teamRosterUpdates: { [pick.currentOwnerId]: updatedRoster },
+      teamRosterUpdates,
       timestamp: new Date().toISOString(),
     };
 
@@ -1231,7 +1292,7 @@ export class DraftStateManager {
     Promise.all([
       this.logActivity(
         'PICK_MADE',
-        `Commissioner edit: pick ${pick.overallPickNumber} (${pick.currentOwner.name}) changed from ${oldPlayer.fullName} to ${newPlayer.fullName}`,
+        `Commissioner edit: pick ${pick.overallPickNumber} (${pick.currentOwner.name}) changed from ${oldPlayer?.fullName ?? 'empty'} to ${newPlayer.fullName}`,
         {
           teamId: pick.currentOwnerId,
           pickNumber: pick.overallPickNumber,

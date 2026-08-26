@@ -195,15 +195,19 @@ export interface PickUndonePayload {
   timestamp: string;
 }
 
-// Completed pick edited by the commissioner post-draft (player swap)
+// Pick edited by the commissioner post-draft (player swap or empty-slot fill)
 export interface PickEditedPayload {
   leagueId: string;
   // The updated row; selectedPlayer is the incoming player
   pick: DraftPickSummary;
-  // Swapped out — returns to the available pool
-  previousPlayer: PlayerSummary;
   // Swapped in — leaves the pool and every queue
   newPlayer: PlayerSummary;
+  // The player who was on the pick (absent when the slot was empty)
+  previousPlayer?: PlayerSummary;
+  // Present only when the outgoing player became a free agent — returns to the pool
+  releasedPlayer?: PlayerSummary;
+  // Another completed pick cleared because it held newPlayer
+  vacatedPick?: DraftPickSummary;
   teamId: string;
   teamRosterUpdates?: Record<string, RosterPlayer[]>;
   timestamp: string;

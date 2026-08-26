@@ -461,6 +461,8 @@ function DraftRoomContent() {
       <EditPickDialog
         pick={editingPick}
         players={state.availablePlayers}
+        teams={state.draftOrder}
+        teamRosters={state.teamRosters}
         onConfirm={async (playerId) => {
           if (!editingPick) return;
           actions.editPick(editingPick.id, playerId);

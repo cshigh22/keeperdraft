@@ -36,8 +36,8 @@ interface DraftBoardProps {
   // rendered so draft history stays visible
   hideKeeperRounds?: boolean;
   onTeamClick?: (teamId: string) => void;
-  // Commissioner post-draft pick editing: filled non-keeper cells become
-  // clickable and open the swap dialog
+  // Commissioner post-draft pick editing: non-keeper cells (filled or empty)
+  // become clickable and open the swap dialog
   canEditPicks?: boolean;
   onEditPick?: (pick: DraftPickSummary) => void;
 }
@@ -385,8 +385,7 @@ export function DraftBoard({
                     const isTraded = pick
                       ? pick.originalOwnerId !== pick.currentOwnerId
                       : false;
-                    const isEditable =
-                      !!canEditPicks && !!pick?.isComplete && !!pick.selectedPlayer && !pick.isKeeper;
+                    const isEditable = !!canEditPicks && !!pick && !pick.isKeeper;
 
                     return (
                       <div key={`${round}-${teamIndex}`} className="min-w-[130px] flex-1">

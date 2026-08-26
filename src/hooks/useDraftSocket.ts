@@ -227,9 +227,9 @@ function applyPickUndone(prev: DraftState, payload: PickUndonePayload): DraftSta
   };
 }
 
-// Commissioner swapped the player on a completed pick post-draft: update the
-// board slot, the owning team's roster, and pool/queue membership for both
-// players. Status and clock fields are deliberately untouched.
+// Commissioner edited a pick post-draft: update the board slot(s), the
+// affected team rosters, and pool/queue membership. Status and clock fields
+// are deliberately untouched.
 function applyPickEdited(prev: DraftState, payload: PickEditedPayload): DraftState {
   const teamQueues: Record<string, PlayerSummary[]> = {};
   for (const [queueTeamId, queue] of Object.entries(prev.teamQueues)) {
@@ -243,21 +243,32 @@ function applyPickEdited(prev: DraftState, payload: PickEditedPayload): DraftSta
       p.id === payload.pick.id ||
       (p.season === payload.pick.season && p.overallPickNumber === payload.pick.overallPickNumber)
   );
+  let completedPicks =
+    editedIndex === -1
+      ? [...prev.completedPicks, payload.pick]
+      : prev.completedPicks.map((p, i) => (i === editedIndex ? payload.pick : p));
+  let allPicks = upsertPickIntoSlot(prev.allPicks, payload.pick, payload.pick.overallPickNumber);
+
+  // A slot vacated because it held the incoming player empties on the board
+  // and leaves the completed list.
+  const vacated = payload.vacatedPick;
+  if (vacated) {
+    completedPicks = completedPicks.filter((p) => p.id !== vacated.id);
+    allPicks = upsertPickIntoSlot(allPicks, vacated, vacated.overallPickNumber);
+  }
 
   return {
     ...prev,
-    completedPicks:
-      editedIndex === -1
-        ? [...prev.completedPicks, payload.pick]
-        : prev.completedPicks.map((p, i) => (i === editedIndex ? payload.pick : p)),
-    allPicks: upsertPickIntoSlot(prev.allPicks, payload.pick, payload.pick.overallPickNumber),
-    // Return the outgoing player to the pool (sorted by rank, like undo) and
-    // drop the incoming one; both filters also make redelivery idempotent.
+    completedPicks,
+    allPicks,
+    // Drop the incoming player from the pool; the outgoing one returns only
+    // when the edit actually released them to free agency. The filters also
+    // make redelivery idempotent.
     availablePlayers: [
       ...prev.availablePlayers.filter(
-        (p) => p.id !== payload.newPlayer.id && p.id !== payload.previousPlayer.id
+        (p) => p.id !== payload.newPlayer.id && p.id !== payload.releasedPlayer?.id
       ),
-      { ...payload.previousPlayer, keptByTeam: null },
+      ...(payload.releasedPlayer ? [{ ...payload.releasedPlayer, keptByTeam: null }] : []),
     ].sort((a, b) => (a.rank || 9999) - (b.rank || 9999)),
     teamRosters: mergeRosterUpdates(prev.teamRosters, payload.teamRosterUpdates),
     teamQueues,

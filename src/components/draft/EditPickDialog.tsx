@@ -1,6 +1,7 @@
-// Commissioner-only dialog for swapping the player on a completed pick after
-// the draft has ended. The candidate pool is the client's availablePlayers
-// from state sync, which already excludes drafted and rostered players.
+// Commissioner-only dialog for putting any player on a pick after the draft
+// has ended. Candidates are the free-agent pool plus every rostered player
+// (tagged with their team); picking a rostered player moves them onto this
+// pick, and the server vacates any other board slot that showed them.
 
 'use client';
 
@@ -18,14 +19,20 @@ import { cn, normalizeForSearch } from '@/lib/utils';
 import { formatRank } from '@/lib/rank';
 import { Search } from 'lucide-react';
 import { positionBadgeColors } from './position-styles';
-import type { DraftPickSummary, PlayerSummary } from '@/types/socket';
+import type { DraftPickSummary, PlayerSummary, RosterPlayer, TeamSummary } from '@/types/socket';
 
 const MAX_RESULTS = 50;
 
+// A candidate row: pool players as-is, rostered players tagged with the team
+// currently holding them.
+type CandidatePlayer = PlayerSummary & { rosteredBy?: string };
+
 interface EditPickDialogProps {
-  // The completed pick being edited; null keeps the dialog closed
+  // The pick being edited (filled or empty); null keeps the dialog closed
   pick: DraftPickSummary | null;
   players: PlayerSummary[];
+  teams: TeamSummary[];
+  teamRosters: Record<string, RosterPlayer[]>;
   onConfirm: (playerId: string) => void;
   onClose: () => void;
 }
@@ -43,11 +50,18 @@ function PositionBadge({ position }: { position?: string }) {
   );
 }
 
-export function EditPickDialog({ pick, players, onConfirm, onClose }: EditPickDialogProps) {
+export function EditPickDialog({
+  pick,
+  players,
+  teams,
+  teamRosters,
+  onConfirm,
+  onClose,
+}: EditPickDialogProps) {
   const [search, setSearch] = useState('');
   // The full player object, not an id: the selection must survive the search
   // being edited (a selected player can drop out of the filtered results).
-  const [selected, setSelected] = useState<PlayerSummary | null>(null);
+  const [selected, setSelected] = useState<CandidatePlayer | null>(null);
 
   // Fresh search state for each pick being edited
   useEffect(() => {
@@ -55,15 +69,29 @@ export function EditPickDialog({ pick, players, onConfirm, onClose }: EditPickDi
     setSelected(null);
   }, [pick?.id]);
 
+  const candidates = useMemo<CandidatePlayer[]>(() => {
+    const teamNameById = new Map(teams.map((t) => [t.id, t.name]));
+    const rostered: CandidatePlayer[] = [];
+    for (const [teamId, roster] of Object.entries(teamRosters)) {
+      for (const p of roster) {
+        // The player already on this pick isn't a swap target
+        if (p.id === pick?.selectedPlayer?.id) continue;
+        rostered.push({ ...p, rosteredBy: teamNameById.get(teamId) || 'another team' });
+      }
+    }
+    return [...players.filter((p) => !p.keptByTeam), ...rostered].sort(
+      (a, b) => (a.rank || 9999) - (b.rank || 9999)
+    );
+  }, [players, teamRosters, teams, pick?.selectedPlayer?.id]);
+
   const results = useMemo(() => {
-    // Kept players are rostered elsewhere and never valid swap targets
-    let pool = players.filter((p) => !p.keptByTeam);
+    let pool = candidates;
     if (search.trim()) {
       const s = normalizeForSearch(search);
       pool = pool.filter((p) => normalizeForSearch(p.fullName).includes(s));
     }
     return pool.slice(0, MAX_RESULTS);
-  }, [players, search]);
+  }, [candidates, search]);
 
   if (!pick) return null;
 
@@ -77,8 +105,9 @@ export function EditPickDialog({ pick, players, onConfirm, onClose }: EditPickDi
             Edit Pick {pick.round}.{pick.pickInRound || pick.overallPickNumber} — {pick.currentOwnerName}
           </DialogTitle>
           <DialogDescription>
-            Swap in an available player. {current?.fullName || 'The current player'} returns to
-            the player pool and the draft board is updated for everyone.
+            {current
+              ? `Put any player on this pick. ${current.fullName} comes off it, and the board is updated for everyone.`
+              : 'This slot is empty — select any player to fill it. The board is updated for everyone.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -127,6 +156,11 @@ export function EditPickDialog({ pick, players, onConfirm, onClose }: EditPickDi
                 </span>
                 <PositionBadge position={player.position} />
                 <span className="text-sm font-medium truncate">{player.fullName}</span>
+                {player.rosteredBy && (
+                  <span className="text-[10px] text-amber-600 truncate flex-shrink-0">
+                    on {player.rosteredBy}
+                  </span>
+                )}
                 <span className="ml-auto text-xs text-muted-foreground uppercase flex-shrink-0">
                   {player.nflTeam || 'FA'}
                 </span>
@@ -134,6 +168,13 @@ export function EditPickDialog({ pick, players, onConfirm, onClose }: EditPickDi
             ))
           )}
         </div>
+
+        {selected?.rosteredBy && (
+          <p className="text-xs text-amber-600">
+            {selected.fullName} is currently on {selected.rosteredBy} — confirming moves them onto
+            this pick, and any other board slot showing them is emptied.
+          </p>
+        )}
 
         <div className="flex justify-end gap-3">
           <Button variant="outline" onClick={onClose}>
