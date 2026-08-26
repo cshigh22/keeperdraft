@@ -4,6 +4,7 @@ import { auth } from '@/auth';
 import { prisma } from '@/lib/prisma';
 import { CommissionerService, DraftSettingsInput } from '@/services/commissioner.service';
 import { updateRankingsFromFantasyCalc } from '@/lib/fantasycalc-api';
+import { seedPlayersFromSleeper } from '@/lib/sleeper-api';
 import { revalidateLeague } from './league';
 
 export async function requireCommissioner(leagueId: string) {
@@ -91,6 +92,28 @@ export async function getDraftSettingsAction(leagueId: string) {
         return { success: true, data: settings };
     } catch (error: any) {
         console.error('Failed to get draft settings:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+export async function syncPlayersAction(leagueId: string) {
+    try {
+        await requireCommissioner(leagueId);
+        // Upserts every Sleeper player: adds new NFL players (rookies,
+        // signings) and refreshes team/status/injury plus the search_rank
+        // baseline. Run BEFORE the FantasyCalc rankings update.
+        const result = await seedPlayersFromSleeper();
+        return {
+            success: result.success,
+            data: {
+                totalPlayers: result.totalPlayers,
+                updatedPlayers: result.updatedPlayers,
+                skippedPlayers: result.skippedPlayers,
+            },
+            errors: result.errors,
+        };
+    } catch (error: any) {
+        console.error('Failed to sync players from Sleeper:', error);
         return { success: false, error: error.message };
     }
 }

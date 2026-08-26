@@ -42,7 +42,7 @@ import {
 } from 'lucide-react';
 import { useDraftSocket } from '@/hooks/useDraftSocket';
 import { SocketErrorToast } from '@/components/draft/SocketErrorToast';
-import { updateDraftSettingsAction, getDraftSettingsAction, updatePlayerRankingsAction } from '@/app/actions/commissioner';
+import { updateDraftSettingsAction, getDraftSettingsAction, updatePlayerRankingsAction, syncPlayersAction } from '@/app/actions/commissioner';
 
 // ============================================================================
 // TYPES & HELPERS
@@ -50,6 +50,7 @@ import { updateDraftSettingsAction, getDraftSettingsAction, updatePlayerRankings
 
 type MyTeam = Awaited<ReturnType<typeof getMyTeam>>;
 type RankingUpdateResult = Awaited<ReturnType<typeof updatePlayerRankingsAction>>;
+type PlayerSyncResult = Awaited<ReturnType<typeof syncPlayersAction>>;
 
 interface ConfirmDialogState {
   open: boolean;
@@ -125,6 +126,10 @@ function CommissionerDashboardContent() {
     loading: boolean;
     result: RankingUpdateResult | null;
   }>({ loading: false, result: null });
+  const [playerSyncStatus, setPlayerSyncStatus] = useState<{
+    loading: boolean;
+    result: PlayerSyncResult | null;
+  }>({ loading: false, result: null });
 
   // Fetch team and settings
   React.useEffect(() => {
@@ -172,6 +177,12 @@ function CommissionerDashboardContent() {
     setRankingUpdateStatus({ loading: true, result: null });
     const result = await updatePlayerRankingsAction(leagueId);
     setRankingUpdateStatus({ loading: false, result });
+  };
+
+  const handlePlayerSync = async () => {
+    setPlayerSyncStatus({ loading: true, result: null });
+    const result = await syncPlayersAction(leagueId);
+    setPlayerSyncStatus({ loading: false, result });
   };
 
   if (authStatus === 'loading' || (authSession && !userTeam && leagueId)) {
@@ -331,6 +342,42 @@ function CommissionerDashboardContent() {
 
               <Separator />
 
+              {/* Player Sync from Sleeper */}
+              <div className="space-y-3">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <Database className="w-4 h-4" />
+                  Player Database
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  Sync the player database from Sleeper: adds new NFL players (rookies, signings) and refreshes teams, statuses, and baseline ranks. Run this before updating rankings.
+                </p>
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={handlePlayerSync}
+                    disabled={playerSyncStatus.loading}
+                    className="gap-2"
+                  >
+                    {playerSyncStatus.loading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                    {playerSyncStatus.loading ? 'Syncing Players...' : 'Sync Players from Sleeper'}
+                  </Button>
+                  {playerSyncStatus.result && (
+                    <Badge variant={playerSyncStatus.result.success ? 'default' : 'destructive'}>
+                      {playerSyncStatus.result.success
+                        ? `✓ Synced ${playerSyncStatus.result.data?.updatedPlayers || 0} players${playerSyncStatus.result.errors?.length ? ` (${playerSyncStatus.result.errors.length} errors)` : ''}`
+                        : `✗ Failed: ${playerSyncStatus.result.error || 'Unknown error'}`
+                      }
+                    </Badge>
+                  )}
+                </div>
+              </div>
+
+              <Separator />
+
               {/* Player Rankings Update */}
               <div className="space-y-3">
                 <h3 className="font-semibold flex items-center gap-2">
@@ -357,7 +404,7 @@ function CommissionerDashboardContent() {
                   {rankingUpdateStatus.result && (
                     <Badge variant={rankingUpdateStatus.result.success ? 'default' : 'destructive'}>
                       {rankingUpdateStatus.result.success
-                        ? `✓ Updated ${rankingUpdateStatus.result.data?.updated || 0} players`
+                        ? `✓ Updated ${rankingUpdateStatus.result.data?.updated || 0} players${rankingUpdateStatus.result.errors?.length ? ` (${rankingUpdateStatus.result.errors.length} errors)` : ''}`
                         : `✗ Failed: ${rankingUpdateStatus.result.error || 'Unknown error'}`
                       }
                     </Badge>

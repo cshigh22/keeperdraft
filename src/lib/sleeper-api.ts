@@ -230,38 +230,6 @@ export async function seedPlayersFromSleeper(): Promise<SeedResult> {
 }
 
 /**
- * Update player rankings from Sleeper (can be run periodically)
- */
-export async function updatePlayerRankings(): Promise<{ updated: number; errors: string[] }> {
-  const result = { updated: 0, errors: [] as string[] };
-
-  try {
-    const sleeperPlayers = await SleeperAPI.fetchAllPlayers();
-
-    for (const [sleeperId, player] of Object.entries(sleeperPlayers)) {
-      try {
-        await prisma.player.updateMany({
-          where: { sleeperId },
-          data: {
-            rank: player.search_rank || null,
-            status: mapStatus(player.status),
-            injuryStatus: player.injury_status || null,
-            nflTeam: player.team || null,
-          },
-        });
-        result.updated++;
-      } catch {
-        // Player might not exist in our DB - that's okay
-      }
-    }
-  } catch (error) {
-    result.errors.push(`Error updating rankings: ${error}`);
-  }
-
-  return result;
-}
-
-/**
  * Sync a Sleeper league's rosters to our database
  */
 export async function syncSleeperLeague(
