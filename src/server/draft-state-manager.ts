@@ -1088,13 +1088,17 @@ export class DraftStateManager {
       // NOTE: future-season pick records are intentionally left untouched — they
       // may represent traded picks. Only the current season is reset.
 
-      // Clear selections AND reset traded picks back to original owners.
-      // Raw query because Prisma updateMany can't set column = another column.
-      await tx.$executeRawUnsafe(
-        `UPDATE "DraftPick" SET "selectedPlayerId" = NULL, "selectedAt" = NULL, "isComplete" = false, "currentOwnerId" = "originalOwnerId" WHERE "leagueId" = $1 AND "season" = $2`,
-        this.leagueId,
-        currentSeason
-      );
+      // Clear selections only. Pick ownership from completed trades is
+      // preserved — traded players stay on their new teams through a reset,
+      // so reverting picks to original owners would half-undo those trades.
+      await tx.draftPick.updateMany({
+        where: { leagueId: this.leagueId, season: currentSeason },
+        data: {
+          selectedPlayerId: null,
+          selectedAt: null,
+          isComplete: false,
+        },
+      });
 
       // Delete all player rosters (except keepers and marketplace FREE_AGENT entries)
       await tx.playerRoster.deleteMany({
