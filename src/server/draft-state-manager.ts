@@ -12,6 +12,7 @@ import { toPlayerSummary, toTeamSummary, toTradeAssetPayload } from './mappers';
 import { buildTradeMap, generatePickSlots } from './draft-pick-generator';
 import { getRestrictedPositions, normalizePosition } from '@/lib/roster-restrictions';
 import { ROSTERED_PLAYER_WHERE, isRosteredEntry } from '@/lib/roster-membership';
+import { NFL_RELEVANT_PLAYER_WHERE } from '@/lib/player-pool';
 import type { Server } from 'socket.io';
 import type {
   ServerToClientEvents,
@@ -392,19 +393,15 @@ export class DraftStateManager {
       }
     }
 
-    // Only current-NFL players belong in the pool: without these filters,
+    // Only current-NFL players belong in the pool: without this filter,
     // ~2k retired and team-less rows crowd active players out of the capped
-    // window. Sleeper marks both unsigned free agents AND never-flagged
-    // retirees as ACTIVE with no team, and its search_rank is popularity
-    // (it ranks retired legends above starters) — so a team-less player is
-    // admitted only when FantasyCalc ranked them (positionRank is only ever
-    // written by the rankings update). That lets signable free agents in and
-    // keeps retired ghosts out. The cap stays as a safety valve.
+    // window. The admission rule (and its Sleeper-quirk rationale) lives in
+    // NFL_RELEVANT_PLAYER_WHERE, shared with the free agency list. The cap
+    // stays as a safety valve.
     const players = await this.prisma.player.findMany({
       where: {
         id: { notIn: Array.from(excludeIds) },
-        status: { in: ['ACTIVE', 'INJURED_RESERVE'] },
-        OR: [{ nflTeam: { not: null } }, { positionRank: { not: null } }],
+        ...NFL_RELEVANT_PLAYER_WHERE,
       },
       orderBy: [{ rank: { sort: 'asc', nulls: 'last' } }, { fullName: 'asc' }],
       take: 2000,
