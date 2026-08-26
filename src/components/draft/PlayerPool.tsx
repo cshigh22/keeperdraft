@@ -460,7 +460,7 @@ const PlayerRow = React.memo(function PlayerRow({
                     </div>
                     <div className="text-[10px] text-slate-500 font-medium uppercase">
                         {player.nflTeam || 'FA'}
-                        {isRestricted && <span className="ml-2 text-amber-600 font-bold lowercase italic text-[9px]">(pos full)</span>}
+                        {isRestricted && <span className="ml-2 text-amber-600 font-bold lowercase italic text-[9px]">(need starters)</span>}
                     </div>
                 </div>
 
