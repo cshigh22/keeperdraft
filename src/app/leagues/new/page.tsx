@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { DEFAULT_IR_SLOT_COUNT } from '@/lib/roster-restrictions';
 
 const ROSTER_POSITIONS = [
     { id: 'qbCount', label: 'QB', default: 1 },
@@ -90,6 +91,21 @@ export default function CreateLeaguePage() {
                                         defaultValue="3"
                                     />
                                     {state.errors?.maxKeepers && <p className="text-sm text-red-500">{state.errors.maxKeepers[0]}</p>}
+                                </div>
+
+                                <div className="space-y-2">
+                                    <Label htmlFor="irSlotCount">IR Spots</Label>
+                                    <Input
+                                        id="irSlotCount"
+                                        name="irSlotCount"
+                                        type="number"
+                                        min="0"
+                                        defaultValue={DEFAULT_IR_SLOT_COUNT}
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        Extra roster spots beyond the limit, usable only by injured
+                                        players (IR, Out, PUP, Doubtful). Set 0 to disable.
+                                    </p>
                                 </div>
                             </div>
                         </div>

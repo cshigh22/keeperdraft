@@ -45,6 +45,30 @@ export function totalRosterSlots(slots: RosterSlotSettings): number {
   );
 }
 
+// IR exemption: a roster may exceed the slot total by a league-configured
+// number of IR spots (DraftSettings.irSlotCount; null means the default), as
+// long as the excess is covered by IR-eligible players. Eligible players
+// occupy regular spots while any are open — only the overflow consumes the
+// exemption — so healthy pickups never benefit from it.
+export const DEFAULT_IR_SLOT_COUNT = 3;
+
+// Sleeper injury statuses that may occupy an IR spot. Questionable (and
+// non-injury designations like Sus) stay ineligible.
+const IR_ELIGIBLE_STATUSES = new Set(['IR', 'OUT', 'PUP', 'DOUBTFUL']);
+
+export function isIREligible(injuryStatus: string | null | undefined): boolean {
+  return injuryStatus != null && IR_ELIGIBLE_STATUSES.has(injuryStatus.toUpperCase());
+}
+
+export function fitsRosterLimit(
+  injuryStatuses: readonly (string | null | undefined)[],
+  maxSlots: number,
+  irSlots: number
+): boolean {
+  const eligibleCount = injuryStatuses.filter(isIREligible).length;
+  return injuryStatuses.length - Math.min(eligibleCount, irSlots) <= maxSlots;
+}
+
 // Shared roster/slot arithmetic behind position restrictions and trade
 // feasibility: which starting slots are still empty once every rostered
 // player (including overflow absorbed into FLEX/SUPERFLEX) is placed.

@@ -42,6 +42,7 @@ export interface GeneralRosterPlayer {
   position: string;
   nflTeam: string | null;
   rank: number | null;
+  injuryStatus: string | null;
   isKeeper: boolean;
   isOnBlock: boolean;
   draftCost: number | null;

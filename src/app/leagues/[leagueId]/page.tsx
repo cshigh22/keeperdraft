@@ -21,7 +21,7 @@ import { Marketplace } from "@/components/marketplace/Marketplace";
 import type { PastWinnerData, KeeperHighlight } from "@/types/champions";
 import type { TradeBlockPlayerData, GeneralRosterPlayer } from "@/types/marketplace";
 import { isRosteredEntry } from "@/lib/roster-membership";
-import { totalRosterSlots } from "@/lib/roster-restrictions";
+import { totalRosterSlots, DEFAULT_IR_SLOT_COUNT } from "@/lib/roster-restrictions";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +60,7 @@ export default async function LeagueDetailPage({
                                     position: true,
                                     nflTeam: true,
                                     rank: true,
+                                    injuryStatus: true,
                                 },
                             },
                         },
@@ -167,6 +168,7 @@ export default async function LeagueDetailPage({
             position: entry.player.position,
             nflTeam: entry.player.nflTeam,
             rank: entry.player.rank,
+            injuryStatus: entry.player.injuryStatus,
             isKeeper: entry.isKeeper,
             isOnBlock: teamBlockedIds.has(entry.player.id),
             draftCost: entry.keeperRound ?? null,
@@ -183,6 +185,7 @@ export default async function LeagueDetailPage({
     // Free agency roster-cap inputs. Count only truly-rostered rows — sentinel
     // signal rows must not eat roster spots.
     const maxRosterSize = league.draftSettings ? totalRosterSlots(league.draftSettings) : null;
+    const irSlotCount = league.draftSettings?.irSlotCount ?? DEFAULT_IR_SLOT_COUNT;
     const myRosteredCount = myTeam ? myTeam.players.filter(isRosteredEntry).length : 0;
 
     // ========================================================================
@@ -482,6 +485,7 @@ export default async function LeagueDetailPage({
                 isCommissioner={isCommissioner}
                 draftStatus={draftStatus}
                 maxRosterSize={maxRosterSize}
+                irSlotCount={irSlotCount}
                 myRosteredCount={myRosteredCount}
                 pendingIncomingCount={pendingIncomingCount}
                 pendingTradesTab={

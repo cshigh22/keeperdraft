@@ -3,6 +3,7 @@
 import React, { useState, useTransition, useEffect, useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { formatRank, UNRANKED_RANK } from '@/lib/rank';
+import { fitsRosterLimit, isIREligible } from '@/lib/roster-restrictions';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -59,6 +60,8 @@ interface MarketplaceProps {
   // "roster full, drop someone" flow (null when the league has no settings)
   draftStatus: string;
   maxRosterSize: number | null;
+  // League's IR spots beyond the roster limit (resolved — never null)
+  irSlotCount: number;
   myRosteredCount: number;
   // Rendered at the right end of the section header (e.g. Propose Trade)
   headerAction?: React.ReactNode;
@@ -93,6 +96,15 @@ function PositionBadge({ position, className }: { position: string; className?: 
   );
 }
 
+function InjuryBadge({ injuryStatus }: { injuryStatus: string | null }) {
+  if (!injuryStatus) return null;
+  return (
+    <Badge className="bg-red-500/15 text-red-500 border-red-500/20 text-[8px] h-3.5 px-1 font-bold uppercase tracking-tighter">
+      {injuryStatus}
+    </Badge>
+  );
+}
+
 function KeeperBadge({ draftCost }: { draftCost: number | null }) {
   return (
     <Badge className="bg-amber-500/15 text-amber-500 border-amber-500/20 text-[8px] h-3.5 px-1 font-bold uppercase tracking-tighter">
@@ -123,6 +135,7 @@ export function Marketplace({
   isCommissioner,
   draftStatus,
   maxRosterSize,
+  irSlotCount,
   myRosteredCount,
   headerAction,
   pendingTradesTab,
@@ -161,7 +174,6 @@ export function Marketplace({
   const [pendingDrop, setPendingDrop] = useState<MyPlayer | null>(null);
 
   const freeAgencyOpen = draftStatus === 'COMPLETED';
-  const rosterFull = maxRosterSize !== null && myRosteredCount >= maxRosterSize;
 
   // Error state (auto-dismisses after 5s)
   const [error, setError] = useState<string | null>(null);
@@ -283,7 +295,17 @@ export function Marketplace({
   };
 
   const handlePickup = (player: FreeAgentPlayer) => {
-    if (rosterFull) {
+    // IR-eligible players get up to irSlotCount spots beyond the roster limit,
+    // so the drop-first flow only triggers when even that exemption can't
+    // absorb the add. Server-side check in pickupFreeAgent is the authority.
+    const needsDrop =
+      maxRosterSize !== null &&
+      !fitsRosterLimit(
+        [...myPlayers.map((p) => p.injuryStatus), player.injuryStatus],
+        maxRosterSize,
+        irSlotCount
+      );
+    if (needsDrop) {
       setPendingPickup(player);
       setDropForPickupOpen(true);
       return;
@@ -670,11 +692,7 @@ export function Marketplace({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-xs font-medium truncate">{p.fullName}</span>
-                          {p.injuryStatus && (
-                            <Badge className="bg-red-500/15 text-red-500 border-red-500/20 text-[8px] h-3.5 px-1 font-bold uppercase tracking-tighter">
-                              {p.injuryStatus}
-                            </Badge>
-                          )}
+                          <InjuryBadge injuryStatus={p.injuryStatus} />
                         </div>
                         <span className="text-[10px] text-muted-foreground">
                           {p.nflTeam || 'FA'} · Rank #{formatRank(p.rank)}
@@ -711,9 +729,12 @@ export function Marketplace({
                 Roster Full — Drop a Player
               </DialogTitle>
               <DialogDescription>
-                Your roster is full ({myRosteredCount}/{maxRosterSize}). Choose a player to drop
-                to make room for {pendingPickup?.fullName}. Dropping a keeper permanently clears
-                their keeper status.
+                Your roster is full ({myRosteredCount}/{maxRosterSize}
+                {pendingPickup && irSlotCount > 0 && isIREligible(pendingPickup.injuryStatus)
+                  ? ` and all ${irSlotCount} IR spots are in use`
+                  : ''}
+                ). Choose a player to drop to make room for {pendingPickup?.fullName}. Dropping a
+                keeper permanently clears their keeper status.
               </DialogDescription>
             </DialogHeader>
 
@@ -728,6 +749,7 @@ export function Marketplace({
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-medium truncate">{player.fullName}</span>
+                        <InjuryBadge injuryStatus={player.injuryStatus} />
                         {player.isKeeper && <KeeperBadge draftCost={player.draftCost} />}
                       </div>
                       <span className="text-[10px] text-muted-foreground">
@@ -924,6 +946,7 @@ export function Marketplace({
                             <span className="text-xs font-medium truncate">
                               {player.fullName}
                             </span>
+                            <InjuryBadge injuryStatus={player.injuryStatus} />
                             {player.isKeeper && <KeeperBadge draftCost={player.draftCost} />}
                           </div>
                           <span className="text-[10px] text-muted-foreground">

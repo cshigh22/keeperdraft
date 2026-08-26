@@ -300,6 +300,9 @@ model DraftSettings {
   kCount               Int       @default(1)
   defCount             Int       @default(1)
   benchCount           Int       @default(9)
+  // Extra roster spots for injured players, beyond the slot total.
+  // Null means the app default (DEFAULT_IR_SLOT_COUNT); 0 disables them.
+  irSlotCount          Int?
   keeperDeadline       DateTime?
   scheduledStartTime   DateTime?
   createdAt            DateTime  @default(now())

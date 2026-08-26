@@ -6,6 +6,7 @@ import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { auth } from '@/auth';
 import { CommissionerService } from '@/services/commissioner.service';
+import { DEFAULT_IR_SLOT_COUNT } from '@/lib/roster-restrictions';
 import type { DraftType } from '@prisma/client';
 
 // ============================================================================
@@ -52,6 +53,13 @@ function parseRosterCounts(formData: FormData): RosterCounts {
     ) as RosterCounts;
 }
 
+// Not parseIntField: an explicit 0 (IR spots disabled) must survive, and 0 is
+// falsy so `|| fallback` would silently turn it back into the default.
+function parseIrSlotCount(formData: FormData): number {
+    const parsed = parseInt(formData.get('irSlotCount') as string);
+    return Number.isNaN(parsed) ? DEFAULT_IR_SLOT_COUNT : Math.max(0, parsed);
+}
+
 // Total rounds = roster spots minus keeper slots (keepers are excluded from the draft board)
 function calculateTotalRounds(rosterCounts: RosterCounts, maxKeepers: number): number {
     const totalRosterSize = Object.values(rosterCounts).reduce((sum, count) => sum + count, 0);
@@ -84,6 +92,7 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
     const maxTeams = parseIntField(formData, 'maxTeams', 12);
     const draftType = ((formData.get('draftType') as string) || 'SNAKE') as 'LINEAR' | 'SNAKE';
     const maxKeepers = parseIntField(formData, 'maxKeepers');
+    const irSlotCount = parseIrSlotCount(formData);
     const rosterCounts = parseRosterCounts(formData);
 
     // Validation
@@ -132,6 +141,7 @@ export async function createLeague(prevState: CreateLeagueState, formData: FormD
                         create: {
                             draftType,
                             maxKeepers,
+                            irSlotCount,
                             ...rosterCounts,
                             totalRounds,
                             timerDurationSeconds: 90,
@@ -316,6 +326,7 @@ export async function updateLeague(
     const name = formData.get('name') as string;
     const draftType = formData.get('draftType') as DraftType;
     const maxKeepers = parseIntField(formData, 'maxKeepers');
+    const irSlotCount = parseIrSlotCount(formData);
     const rosterCounts = parseRosterCounts(formData);
     const timerDurationSeconds = parseIntField(formData, 'timerDurationSeconds', 90);
 
@@ -342,6 +353,7 @@ export async function updateLeague(
                 data: {
                     draftType,
                     maxKeepers,
+                    irSlotCount,
                     ...rosterCounts,
                     totalRounds,
                     timerDurationSeconds,

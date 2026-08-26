@@ -6,7 +6,12 @@ import { prisma } from '@/lib/prisma';
 import { requireTeamAccess } from '@/lib/team-access';
 import { ROSTERED_PLAYER_WHERE, isRosteredEntry } from '@/lib/roster-membership';
 import { NFL_RELEVANT_PLAYER_WHERE } from '@/lib/player-pool';
-import { totalRosterSlots } from '@/lib/roster-restrictions';
+import {
+    totalRosterSlots,
+    fitsRosterLimit,
+    isIREligible,
+    DEFAULT_IR_SLOT_COUNT,
+} from '@/lib/roster-restrictions';
 import { revalidateLeague } from './league';
 
 // Free agency opens only once the draft is done: before that, roster building
@@ -106,6 +111,7 @@ export async function pickupFreeAgent(input: {
         const settings = await prisma.draftSettings.findUnique({ where: { leagueId } });
         if (!settings) throw new Error('League draft settings not found');
         const maxSize = totalRosterSlots(settings);
+        const irSlots = settings.irSlotCount ?? DEFAULT_IR_SLOT_COUNT;
 
         await prisma.$transaction(async (tx) => {
             if (dropRosterEntryId) {
@@ -121,13 +127,29 @@ export async function pickupFreeAgent(input: {
                 });
             }
 
-            // Counted after the drop, so a full roster with a drop passes.
-            const rosteredCount = await tx.playerRoster.count({
-                where: { leagueId, teamId, ...ROSTERED_PLAYER_WHERE },
+            const pickupPlayer = await tx.player.findUnique({
+                where: { id: playerId },
+                select: { injuryStatus: true },
             });
-            if (rosteredCount >= maxSize) {
+            if (!pickupPlayer) throw new Error('Player not found');
+
+            // Counted after the drop, so a full roster with a drop passes.
+            // IR-eligible players get up to irSlots spots beyond the limit.
+            const rostered = await tx.playerRoster.findMany({
+                where: { leagueId, teamId, ...ROSTERED_PLAYER_WHERE },
+                select: { player: { select: { injuryStatus: true } } },
+            });
+            const statusesAfterAdd = [
+                ...rostered.map((entry) => entry.player.injuryStatus),
+                pickupPlayer.injuryStatus,
+            ];
+            if (!fitsRosterLimit(statusesAfterAdd, maxSize, irSlots)) {
+                const irNote =
+                    irSlots > 0 && isIREligible(pickupPlayer.injuryStatus)
+                        ? ` and all ${irSlots} IR spots are in use`
+                        : '';
                 throw new Error(
-                    `Your roster is full (${rosteredCount}/${maxSize}). Choose a player to drop.`
+                    `Your roster is full (${rostered.length}/${maxSize})${irNote}. Choose a player to drop.`
                 );
             }
 
